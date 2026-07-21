@@ -116,4 +116,9 @@ public class GitContextMock implements GitContext {
   public void saveCurrentCommitId(Path repository, Path trackedCommitIdPath) {
 
   }
+
+  @Override
+  public void addRemote(Path repository, String name, String url) {
+
+  }
 }

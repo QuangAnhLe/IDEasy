@@ -245,4 +245,13 @@ public interface GitContext {
    * @param trackedCommitIdPath the path to the file where the commit Id will be written.
    */
   void saveCurrentCommitId(Path repository, Path trackedCommitIdPath);
+
+  /**
+   * Adds a new git remote to the given repository using {@code git remote add}.
+   *
+   * @param repository the {@link Path} to the git repository.
+   * @param name the name of the remote to add (e.g. "upstream").
+   * @param url the URL of the remote to add.
+   */
+  void addRemote(Path repository, String name, String url);
 }
