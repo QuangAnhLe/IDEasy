@@ -261,7 +261,8 @@ public interface GitContext {
    * @param url the URL of the remote to add.
    */
   void addRemote(Path repository, String name, String url);
-   * Commits the staged changes in the given repository.
+   /**
+   *  Commits the staged changes in the given repository.
    *
    * @param repository the {@link Path} to the git repository.
    * @param message the commit message.
