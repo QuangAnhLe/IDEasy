@@ -119,7 +119,6 @@ public class GitContextMock implements GitContext {
     return "origin";
   }
 
-
   @Override
   public void saveCurrentCommitId(Path repository, Path trackedCommitIdPath) {
 
@@ -129,7 +128,8 @@ public class GitContextMock implements GitContext {
   public void addRemote(Path repository, String name, String url) {
 
   }
-}
+
+  @Override
   public void commit(Path repository, String message, boolean addAll) {
 
   }
