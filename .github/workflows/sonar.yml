@@ -2,7 +2,9 @@ name: Sonar Analysis
 
 on:
   workflow_dispatch:
-
+  push:
+    branches:
+      - test
 jobs:
   build:
     name: Build and analyze
@@ -33,4 +35,10 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-        run: mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dsonar.projectKey=IDeasy -Dsonar.projectName='IDeasy'
+        run: |
+          mvn -B verify \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.projectKey=IDeasy \
+            -Dsonar.projectName=IDeasy \
+            -Dsonar.host.url=${SONAR_HOST_URL} \
+            -Dsonar.token=${SONAR_TOKEN}
