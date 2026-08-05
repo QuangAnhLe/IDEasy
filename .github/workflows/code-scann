@@ -1,15 +1,5 @@
-name: Sonar Analysis
-
-on:
-  workflow_dispatch:
-
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-
+name: Scann-Code
+on: pull_request
 jobs:
   build:
     name: Build and analyze
