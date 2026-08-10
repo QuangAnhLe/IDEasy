@@ -28,7 +28,9 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           mvn -B -ntp verify sonar:sonar \
-            -Dsonar.projectKey=devonfw_IDEasy \
-            -Dsonar.organization=devonfw
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.organization=quanganhle \
+            -Dsonar.projectKey=QuangAnhLe_IDEasy \
+            -Dsonar.token=${SONAR_TOKEN}
       - name: Coveralls GitHub Action
         uses: coverallsapp/github-action@v2.2.3
