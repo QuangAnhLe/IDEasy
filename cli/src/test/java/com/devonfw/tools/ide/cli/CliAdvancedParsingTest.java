@@ -13,7 +13,7 @@ class CliAdvancedParsingTest extends AbstractIdeContextTest {
   private static final String PROJECT_MVN = "mvn";
 
   /**
-   * Test that implicit end-options is triggered for multi-valued arguments to prevent splitting odd-formatted short-options like "-version".
+   * Test that implicit end-options is triggered for multi-valued arguments to prevent splitting odd-formatted short-options like "-version"
    */
   @Test
   void testPreventShortOptionsForMultivaluedArguments() {
