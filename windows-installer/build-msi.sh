@@ -2,8 +2,6 @@
 
 set -euo pipefail
 
-repository_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${repository_dir}"
 
 mvn -B -ntp -f documentation/pom.xml clean install
 
