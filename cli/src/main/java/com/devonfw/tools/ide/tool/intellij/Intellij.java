@@ -3,20 +3,15 @@ package com.devonfw.tools.ide.tool.intellij;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.w3c.dom.Document;
 
-import com.devonfw.tools.ide.cli.CliException;
-import com.devonfw.tools.ide.commandlet.CommandletManager;
 import com.devonfw.tools.ide.common.Tag;
 import com.devonfw.tools.ide.context.IdeContext;
-import com.devonfw.tools.ide.environment.AbstractEnvironmentVariables;
 import com.devonfw.tools.ide.environment.EnvironmentVariables;
-import com.devonfw.tools.ide.environment.ExtensibleEnvironmentVariables;
 import com.devonfw.tools.ide.merge.xml.XmlMergeDocument;
 import com.devonfw.tools.ide.merge.xml.XmlMerger;
 import com.devonfw.tools.ide.process.EnvironmentContext;
@@ -46,7 +41,6 @@ public class Intellij extends IdeaBasedIdeToolCommandlet {
   private static final String IDEA_BASH_SCRIPT = IDEA + ".sh";
 
   private static final String FOLDER_IDEA_CONFIG = ".idea";
-  private static final String TEMPLATE_LOCATION = "intellij/workspace/repository/" + FOLDER_IDEA_CONFIG;
   private static final String GRADLE_XML = "gradle.xml";
   private static final String MISC_XML = "misc.xml";
   private static final String IDEA_PROPERTIES = "idea.properties";
@@ -61,6 +55,7 @@ public class Intellij extends IdeaBasedIdeToolCommandlet {
   public Intellij(IdeContext context) {
 
     super(context, "intellij", Set.of(Tag.INTELLIJ));
+    registerExtraSdkTemplate("java", Path.of(".intellij/config/options/jdk.table.xml"));
   }
 
   @Override
@@ -97,7 +92,7 @@ public class Intellij extends IdeaBasedIdeToolCommandlet {
     ToolEdition edition = requested.getEdition();
     // Check if edition is set as "ultimate"
     if ("ultimate".equals(edition.edition())) {
-      
+
       VersionIdentifier version;
       if (requested.getVersion() != null) {
         version = VersionIdentifier.of(requested.getVersion().toString());
@@ -105,15 +100,18 @@ public class Intellij extends IdeaBasedIdeToolCommandlet {
         version = getConfiguredVersion();
       }
       // Check whether set version warrants switching editions
-      if ((version.isGreater(INTELLIJ_LAST_SEPARATE_VERSION)) || // Specified version is > 2025.2.6.1 **OR** no specified version but configured version is > 2025.2.6.1
-        (VersionIdentifier.LATEST.equals(version)) || // No version specified and no configured version
-        (VersionIdentifier.LATEST_UNSTABLE.equals(version))) { // No version specified and no configured version
+      if ((version.isGreater(INTELLIJ_LAST_SEPARATE_VERSION)) ||
+          // Specified version is > 2025.2.6.1 **OR** no specified version but configured version is > 2025.2.6.1
+          (VersionIdentifier.LATEST.equals(version)) || // No version specified and no configured version
+          (VersionIdentifier.LATEST_UNSTABLE.equals(version))) { // No version specified and no configured version
         // Switching to IntelliJ Standard edition
         LOG.warn("""
-                 Notice: You have configured IDEasy to use the IntelliJ Ultimate Edition. Since version 2025.3, the Ultimate and Community editions of IntelliJ have been unified into a single edition.
-                 Since you are attempting to install a version of IntelliJ that is 2025.3 or newer, we are automatically switching your edition to the unified edition to ensure compatibility.
-                 To specifically install the last true ultimate version of IntelliJ, please run "ide install intellij 2025.2.6.1".
-                 Otherwise, we recommend permanently switching to the unified edition by running "ide set-edition intellij intellij".""");
+            Notice: You have configured IDEasy to use the IntelliJ Ultimate Edition.
+            Since version 2025.3, the Ultimate and Community editions of IntelliJ have been unified into a single edition.
+            Since you are attempting to install a version of IntelliJ that is 2025.3 or newer,
+            we are automatically switching your edition to the unified edition to ensure compatibility.
+            To specifically install the last true ultimate version of IntelliJ, please run "ide install intellij 2025.2.6.1".
+            Otherwise, we recommend permanently switching to the unified edition by running "ide set-edition intellij intellij".""");
         edition = new ToolEdition(this.tool, "intellij");
         requested.replaceEdition(edition);
       }
@@ -121,32 +119,23 @@ public class Intellij extends IdeaBasedIdeToolCommandlet {
     return requested;
   }
 
-  private EnvironmentVariables getIntellijEnvironmentVariables(Path projectPath) {
-    ExtensibleEnvironmentVariables environmentVariables = new ExtensibleEnvironmentVariables(
-        (AbstractEnvironmentVariables) this.context.getVariables().getParent(), this.context);
+  @Override
+  protected String getTemplateFolder() {
 
-    environmentVariables.setValue("PROJECT_PATH", projectPath.toString().replace('\\', '/'));
-    return environmentVariables.resolved();
+    return FOLDER_IDEA_CONFIG;
   }
 
-  private void mergeConfig(Path repositoryPath, String configFilePath) {
-    Path templatePath = this.context.getSettingsPath().resolve(TEMPLATE_LOCATION);
-    Path templateFile = templatePath.resolve(configFilePath);
-    if (!Files.exists(templateFile)) {
-      throw new CliException(
-          "Cannot import project into workspace: template file not found at " + templateFile + "\n"
-              + "Please do an upstream merge of your settings git repository.");
-    }
-    Path workspacesPath = this.context.getIdeHome().resolve(IdeContext.FOLDER_WORKSPACES);
-    Path workspacePath = this.context.getFileAccess().findAncestor(repositoryPath, workspacesPath, 1);
-    if (workspacePath == null) {
-      throw new CliException(
-          "Cannot import project into workspace: could not find workspace from " + repositoryPath);
-    }
-    XmlMerger xmlMerger = new XmlMerger(this.context);
-    EnvironmentVariables environmentVariables = getIntellijEnvironmentVariables(workspacePath.relativize(repositoryPath));
-    Path workspaceFile = workspacePath.resolve(FOLDER_IDEA_CONFIG).resolve(configFilePath);
+  /**
+   * Merges the IntelliJ project template into the workspace's {@code .idea} config (e.g. {@code misc.xml} or {@code gradle.xml}).
+   *
+   * @param templateFile the resolved {@link Path} to the template file in the settings repository.
+   * @param workspaceFile the {@link Path} to the target {@code .idea} file to merge into.
+   * @param environmentVariables the {@link EnvironmentVariables} to resolve variables (e.g. {@code PROJECT_PATH}) in the template.
+   */
+  @Override
+  protected void doMergeTemplate(Path templateFile, Path workspaceFile, EnvironmentVariables environmentVariables) {
 
+    XmlMerger xmlMerger = new XmlMerger(this.context);
     XmlMergeDocument workspaceDocument = xmlMerger.load(workspaceFile);
     XmlMergeDocument templateDocument = xmlMerger.loadAndResolve(templateFile, environmentVariables);
 
@@ -156,18 +145,8 @@ public class Intellij extends IdeaBasedIdeToolCommandlet {
   }
 
   @Override
-  public void importRepository(Path repositoryPath) {
-    CommandletManager commandletManager = this.context.getCommandletManager();
-    for (Entry<Class<? extends LocalToolCommandlet>, String> entry : BUILD_TOOL_TO_IJ_TEMPLATE.entrySet()) {
-      LocalToolCommandlet buildTool = commandletManager.getCommandlet(entry.getKey());
-      Path buildDescriptor = buildTool.findBuildDescriptor(repositoryPath);
-      if (buildDescriptor != null) {
-        String templateFilename = entry.getValue();
-        LOG.debug("Found build descriptor {} so merging template {}", buildDescriptor, templateFilename);
-        mergeConfig(repositoryPath, templateFilename);
-        return;
-      }
-    }
-    LOG.warn("No supported build descriptor was found for project import in {}", repositoryPath);
+  protected Map<Class<? extends LocalToolCommandlet>, String> getBuildTool2TemplateMap() {
+
+    return BUILD_TOOL_TO_IJ_TEMPLATE;
   }
 }
