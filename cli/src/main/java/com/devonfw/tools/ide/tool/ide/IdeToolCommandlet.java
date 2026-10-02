@@ -2,144 +2,184 @@ package com.devonfw.tools.ide.tool.ide;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
-import java.util.Set;
+import java.util.Map;
+import java.util.Map.Entry;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.devonfw.tools.ide.common.Tag;
+import com.devonfw.tools.ide.cli.CliException;
+import com.devonfw.tools.ide.commandlet.Commandlet;
+import com.devonfw.tools.ide.commandlet.CommandletManager;
 import com.devonfw.tools.ide.context.IdeContext;
-import com.devonfw.tools.ide.io.FileAccess;
-import com.devonfw.tools.ide.process.ProcessMode;
-import com.devonfw.tools.ide.process.ProcessResult;
-import com.devonfw.tools.ide.step.Step;
-import com.devonfw.tools.ide.tool.ToolCommandlet;
-import com.devonfw.tools.ide.tool.ToolInstallRequest;
-import com.devonfw.tools.ide.tool.ToolInstallation;
-import com.devonfw.tools.ide.tool.eclipse.Eclipse;
-import com.devonfw.tools.ide.tool.intellij.Intellij;
-import com.devonfw.tools.ide.tool.plugin.PluginBasedCommandlet;
-import com.devonfw.tools.ide.tool.vscode.Vscode;
+import com.devonfw.tools.ide.environment.AbstractEnvironmentVariables;
+import com.devonfw.tools.ide.environment.EnvironmentVariables;
+import com.devonfw.tools.ide.environment.ExtensibleEnvironmentVariables;
+import com.devonfw.tools.ide.tool.AbstractLocalToolCommandlet;
+import com.devonfw.tools.ide.tool.LocalToolCommandlet;
 
 /**
- * {@link ToolCommandlet} for an IDE (integrated development environment) such as {@link Eclipse}, {@link Vscode}, or {@link Intellij}.
+ * {@link Commandlet} interface for IDE-specific features that are independent of the installation mechanism (binary vs. package manager).
+ * <p>
+ * This allows tools installed via package managers (like pip for Spyder) to still benefit from IDEasy's IDE features such as workspace configuration, metadata
+ * management, and repository import.
  */
-public abstract class IdeToolCommandlet extends PluginBasedCommandlet {
+public interface IdeToolCommandlet extends LocalToolCommandlet {
 
-  private static final Logger LOG = LoggerFactory.getLogger(IdeToolCommandlet.class);
+  Logger LOG = LoggerFactory.getLogger(IdeToolCommandlet.class);
 
   /**
-   * The constructor.
+   * @return the {@link IdeWorkspaceConfigurer} that configures the workspace of this IDE. Needed so that the default {@link #configureWorkspace()} of this
+   *     interface can delegate the shared workspace configuration logic to a single implementation.
+   */
+  IdeWorkspaceConfigurer getWorkspaceConfigurer();
+
+  /**
+   * Configures (initializes or updates) the workspace for this IDE using the templates from the settings. The default implementation is shared by all IDEs,
+   * whether installed as binary (see {@link AbstractIdeToolCommandlet}) or via a package manager (see
+   * {@link com.devonfw.tools.ide.tool.pip.PipBasedIdeToolCommandlet}).
+   */
+  default void configureWorkspace() {
+
+    getWorkspaceConfigurer().configureWorkspace(this::getWorkspaceRedirects);
+  }
+
+  /**
+   * @param workspaceFolder the {@link IdeContext#getWorkspacePath() workspace folder}.
+   * @return the {@link Map} with the {@link Path}s inside the given {@code workspaceFolder} as keys and the {@link Path}s where the according workspace
+   *     templates shall be merged to instead as values. Allows to keep IDE-specific data out of the workspace (e.g. in {@link #getIdeMetadataPath()}) without
+   *     changing the structure of the workspace templates in the settings. By default, nothing is redirected.
+   */
+  default Map<Path, Path> getWorkspaceRedirects(Path workspaceFolder) {
+
+    return Map.of();
+  }
+
+  /**
+   * @return the {@link Path} to the IDE-specific metadata folder for the current workspace, located at {@code $IDE_HOME/.ide/«toolName»/«workspace»}. Unlike
+   *     {@link IdeContext#getWorkspacePath() the workspace path} (which holds the projects to open), this folder keeps IDE-specific metadata (e.g.
+   *     {@code .vmoptions} or {@code *.properties} files) out of the workspace so it stays clean and independent of the IDE being used.
    *
-   * @param context the {@link IdeContext}.
-   * @param tool the {@link #getName() tool name}.
-   * @param tags the {@link #getTags() tags} classifying the tool. Should be created via {@link Set#of(Object) Set.of} method.
+   *     <p>
+   *     The default implementation is shared by all IDEs, whether installed as binary (see {@link AbstractIdeToolCommandlet}) or via a package manager (see
+   *     {@link com.devonfw.tools.ide.tool.pip.PipBasedIdeToolCommandlet}).
    */
-  public IdeToolCommandlet(IdeContext context, String tool, Set<Tag> tags) {
+  default Path getIdeMetadataPath() {
 
-    super(context, tool, tags);
-    assert (hasIde(tags));
-  }
-
-  private boolean hasIde(Set<Tag> tags) {
-
-    for (Tag tag : tags) {
-      if (tag.isAncestorOf(Tag.IDE) || (tag == Tag.IDE)) {
-        return true;
-      }
-    }
-    throw new IllegalStateException("Tags of IdeTool has to be connected with tag IDE: " + tags);
-  }
-
-  @Override
-  protected final void doRun() {
-    super.doRun();
-  }
-
-  @Override
-  public ProcessResult runTool(List<String> args) {
-
-    return runTool(ProcessMode.BACKGROUND, null, args);
-  }
-
-  @Override
-  public ToolInstallation install(ToolInstallRequest request) {
-
-    configureWorkspace();
-    return super.install(request);
-  }
-
-  /**
-   * @return the {@link Path} to the IDE-specific metadata folder for the {@link IdeContext#getWorkspaceName() current workspace}, located at
-   *     {@code $IDE_HOME/.ide/«ide»/«workspace»}. Unlike {@link IdeContext#getWorkspacePath() the workspace path} (which holds the projects to open), this
-   *     folder keeps IDE-specific metadata (e.g. {@code .vmoptions} or {@code *.properties} files) out of the workspace so it stays clean and independent of
-   *     the IDE being used.
-   */
-  protected Path getIdeMetadataPath() {
-
-    return this.context.getIdeHome().resolve(IdeContext.FOLDER_DOT_IDE).resolve(getName()).resolve(this.context.getWorkspaceName());
-  }
-
-  /**
-   * Configure (initialize or update) the workspace for this IDE using the templates from the settings.
-   */
-  protected void configureWorkspace() {
-
-    FileAccess fileAccess = this.context.getFileAccess();
-    Path workspaceFolder = this.context.getWorkspacePath();
-    if (!fileAccess.isExpectedFolder(workspaceFolder)) {
-      LOG.warn("Current workspace does not exist: {}", workspaceFolder);
-      return; // should actually never happen...
-    }
-    Step step = this.context.newStep("Configuring workspace " + workspaceFolder.getFileName() + " for IDE " + this.tool);
-    step.run(() -> doMergeWorkspaceStep(step, workspaceFolder));
-  }
-
-  private void doMergeWorkspaceStep(Step step, Path workspaceFolder) {
-
-    int errors = 0;
-    errors = mergeWorkspace(this.context.getUserHomeIde(), workspaceFolder, errors);
-    errors = mergeWorkspace(this.context.getSettingsPath(), workspaceFolder, errors);
-    errors = mergeWorkspace(this.context.getConfPath(), workspaceFolder, errors);
-    if (errors == 0) {
-      step.success();
-    } else {
-      step.error("Your workspace configuration failed with {} error(s) - see log above.\n"
-          + "This is either a configuration error in your settings git repository or a bug in IDEasy.\n"
-          + "Please analyze the above errors with your team or IDE-admin and try to fix the problem.", errors);
-      this.context.askToContinue(
-          "In order to prevent you from being blocked, you can start your IDE anyhow but some configuration may not be in sync.");
-    }
-  }
-
-  private int mergeWorkspace(Path configFolder, Path workspaceFolder, int errors) {
-
-    int result = errors;
-    result = mergeWorkspaceSingle(configFolder.resolve(IdeContext.FOLDER_WORKSPACE), workspaceFolder, result);
-    result = mergeWorkspaceSingle(configFolder.resolve(this.tool).resolve(IdeContext.FOLDER_WORKSPACE), workspaceFolder, result);
-    return result;
-  }
-
-  private int mergeWorkspaceSingle(Path templatesFolder, Path workspaceFolder, int errors) {
-
-    Path setupFolder = templatesFolder.resolve(IdeContext.FOLDER_SETUP);
-    Path updateFolder = templatesFolder.resolve(IdeContext.FOLDER_UPDATE);
-    if (!Files.isDirectory(setupFolder) && !Files.isDirectory(updateFolder)) {
-      LOG.trace("Skipping empty or non-existing workspace template folder {}.", templatesFolder);
-      return errors;
-    }
-    LOG.debug("Merging workspace templates from {}...", templatesFolder);
-    return errors + this.context.getWorkspaceMerger().merge(setupFolder, updateFolder, this.context.getVariables(), workspaceFolder);
+    IdeContext context = getContext();
+    return context.getIdeHome().resolve(IdeContext.FOLDER_DOT_IDE).resolve(getName()).resolve(context.getWorkspaceName());
   }
 
   /**
    * Imports the repository specified by the given {@link Path} into the IDE managed by this {@link IdeToolCommandlet}.
    *
+   * <p>
+   * The repository is searched for a build descriptor of any build tool that this IDE supports via {@link #getBuildTool2TemplateMap()}. The first match
+   * triggers a merge of the corresponding template into the workspace via {@link #mergeTemplate(Path, String)}. If no build tool of this IDE applies the
+   * repository is skipped.
+   * </p>
+   *
    * @param repositoryPath the {@link Path} to the repository directory to import.
    */
-  public void importRepository(Path repositoryPath) {
+  default void importRepository(Path repositoryPath) {
 
-    throw new UnsupportedOperationException("Repository import is not yet implemented for IDE " + this.tool);
+    CommandletManager commandletManager = getContext().getCommandletManager();
+    for (Entry<Class<? extends AbstractLocalToolCommandlet>, String> entry : getBuildTool2TemplateMap().entrySet()) {
+      AbstractLocalToolCommandlet buildTool = commandletManager.getCommandlet(entry.getKey());
+      Path buildDescriptor = buildTool.findBuildDescriptor(repositoryPath);
+      if (buildDescriptor != null) {
+        String templateFilename = entry.getValue();
+        LOG.debug("Found build descriptor {} so merging template {}", buildDescriptor, templateFilename);
+        mergeTemplate(repositoryPath, templateFilename);
+        return;
+      }
+    }
+    LOG.warn("No supported build descriptor was found for project import in {}", repositoryPath);
+  }
+
+  /**
+   * @return the mapping of supported build tool commandlets to the template file name to be merged into the workspace (see
+   *     {@link #mergeTemplate(Path, String)}) when the corresponding build descriptor is present in the imported repository.
+   *     The default is an empty map meaning that no build tool is supported for repository import by this IDE.
+   */
+  default Map<Class<? extends AbstractLocalToolCommandlet>, String> getBuildTool2TemplateMap() {
+
+    return Map.of();
+  }
+
+  /**
+   * Merges the template with the given file name into the workspace for the imported repository. This is the IDE-specific part of
+   * {@link #importRepository(Path)} and is called after a supported build descriptor was found.
+   *
+   * <p>
+   * The template location is built dynamically from the tool name (see {@link #getTemplateFolder()}) and the template file name, so no per-IDE template path
+   * constant is needed. The environment variables are created via {@link #getTemplateEnvironmentVariables(Path)} with the relative project path as
+   * {@code PROJECT_PATH}.
+   * </p>
+   *
+   * @param repositoryPath the {@link Path} to the imported repository directory.
+   * @param templateFilename the file name of the workspace-relative template to merge (as configured in {@link #getBuildTool2TemplateMap()}).
+   */
+  default void mergeTemplate(Path repositoryPath, String templateFilename) {
+
+    String templateFolder = getTemplateFolder();
+    if (templateFolder == null) {
+      throw new UnsupportedOperationException("Repository import is not yet implemented for IDE " + getName());
+    }
+    Path templateFile = getContext().getSettingsPath()
+        .resolve(getName())
+        .resolve(IdeContext.FOLDER_WORKSPACE)
+        .resolve(IdeContext.FOLDER_REPOSITORY)
+        .resolve(templateFolder)
+        .resolve(templateFilename);
+    if (!Files.exists(templateFile)) {
+      throw new CliException("Cannot import project into workspace: template file not found at " + templateFile + "\n"
+          + "Please do an upstream merge of your settings git repository.");
+    }
+    Path workspacesPath = getContext().getIdeHome().resolve(IdeContext.FOLDER_WORKSPACES);
+    Path workspacePath = getContext().getFileAccess().findAncestor(repositoryPath, workspacesPath, 1);
+    if (workspacePath == null) {
+      throw new CliException("Cannot import project into workspace: could not find workspace from " + repositoryPath);
+    }
+    EnvironmentVariables environmentVariables = getTemplateEnvironmentVariables(workspacePath.relativize(repositoryPath));
+    Path workspaceFile = workspacePath.resolve(templateFolder).resolve(templateFilename);
+    doMergeTemplate(templateFile, workspaceFile, environmentVariables);
+  }
+
+  /**
+   * Performs the actual merge of the resolved template file into the workspace file. This is the only IDE-specific part of
+   * {@link #mergeTemplate(Path, String)} as the merge algorithm differs per IDE (e.g. {@code JSON} vs {@code XML}).
+   *
+   * @param templateFile the resolved {@link Path} to the template file in the settings repository.
+   * @param workspaceFile the {@link Path} to the target file in the workspace to merge the template into.
+   * @param environmentVariables the {@link EnvironmentVariables} to resolve variables (e.g. {@code PROJECT_PATH}) in the template.
+   */
+  default void doMergeTemplate(Path templateFile, Path workspaceFile, EnvironmentVariables environmentVariables) {
+
+    throw new UnsupportedOperationException("Repository import is not yet implemented for IDE " + getName());
+  }
+
+  /**
+   * @return the name of the IDE configuration folder (e.g. {@code .vscode} or {@code .idea}) inside which the repository workspace templates
+   *     are stored and merged, or {@code null} if this IDE does not support repository import. This folder is used both in the settings
+   *     repository to locate the template and in the workspace to store the merged result.
+   */
+  default String getTemplateFolder() {
+
+    return null;
+  }
+
+  /**
+   * Creates {@link EnvironmentVariables} for resolving the imported repository workspace template with the relative project path as {@code PROJECT_PATH}.
+   *
+   * @param projectPath the relative {@link Path} from the workspace root to the repository.
+   * @return the resolved {@link EnvironmentVariables}.
+   */
+  default EnvironmentVariables getTemplateEnvironmentVariables(Path projectPath) {
+
+    ExtensibleEnvironmentVariables environmentVariables = new ExtensibleEnvironmentVariables(
+        (AbstractEnvironmentVariables) getContext().getVariables().getParent(), getContext());
+    environmentVariables.setValue("PROJECT_PATH", projectPath.toString().replace('\\', '/'));
+    return environmentVariables.resolved();
   }
 }

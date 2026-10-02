@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -17,6 +18,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.logging.FileHandler;
 import java.util.logging.LogManager;
@@ -30,17 +32,16 @@ import com.devonfw.tools.ide.cli.CliArgument;
 import com.devonfw.tools.ide.cli.CliArguments;
 import com.devonfw.tools.ide.cli.CliException;
 import com.devonfw.tools.ide.cli.CliSuggester;
-import com.devonfw.tools.ide.commandlet.Commandlet;
+import com.devonfw.tools.ide.commandlet.AbstractCommandlet;
 import com.devonfw.tools.ide.commandlet.CommandletManager;
 import com.devonfw.tools.ide.commandlet.CommandletManagerImpl;
 import com.devonfw.tools.ide.commandlet.ContextCommandlet;
 import com.devonfw.tools.ide.commandlet.EnvironmentCommandlet;
-import com.devonfw.tools.ide.commandlet.UpdateCommandlet;
 import com.devonfw.tools.ide.commandlet.UpgradeCommandlet;
+import com.devonfw.tools.ide.commandlet.update.UpdateCommandlet;
 import com.devonfw.tools.ide.common.SystemPath;
 import com.devonfw.tools.ide.completion.CompletionCandidate;
 import com.devonfw.tools.ide.completion.CompletionCandidateCollector;
-import com.devonfw.tools.ide.completion.CompletionCandidateCollectorDefault;
 import com.devonfw.tools.ide.environment.AbstractEnvironmentVariables;
 import com.devonfw.tools.ide.environment.EnvironmentVariables;
 import com.devonfw.tools.ide.environment.EnvironmentVariablesType;
@@ -49,6 +50,7 @@ import com.devonfw.tools.ide.environment.IdeSystemImpl;
 import com.devonfw.tools.ide.git.GitContext;
 import com.devonfw.tools.ide.git.GitContextImpl;
 import com.devonfw.tools.ide.git.GitUrl;
+import com.devonfw.tools.ide.git.repository.RepositoryType;
 import com.devonfw.tools.ide.io.FileAccess;
 import com.devonfw.tools.ide.io.FileAccessImpl;
 import com.devonfw.tools.ide.log.IdeLogArgFormatter;
@@ -64,6 +66,7 @@ import com.devonfw.tools.ide.os.SystemInfoImpl;
 import com.devonfw.tools.ide.os.WindowsHelper;
 import com.devonfw.tools.ide.os.WindowsHelperImpl;
 import com.devonfw.tools.ide.os.WindowsPathSyntax;
+import com.devonfw.tools.ide.process.EnvironmentContext;
 import com.devonfw.tools.ide.process.ProcessContext;
 import com.devonfw.tools.ide.process.ProcessContextImpl;
 import com.devonfw.tools.ide.process.ProcessResult;
@@ -71,14 +74,16 @@ import com.devonfw.tools.ide.property.KeywordProperty;
 import com.devonfw.tools.ide.property.Property;
 import com.devonfw.tools.ide.step.Step;
 import com.devonfw.tools.ide.step.StepImpl;
+import com.devonfw.tools.ide.tool.AbstractLocalToolCommandlet;
+import com.devonfw.tools.ide.tool.ToolInstallation;
 import com.devonfw.tools.ide.tool.custom.CustomToolRepository;
 import com.devonfw.tools.ide.tool.custom.CustomToolRepositoryImpl;
 import com.devonfw.tools.ide.tool.mvn.MvnRepository;
 import com.devonfw.tools.ide.tool.npm.NpmRepository;
 import com.devonfw.tools.ide.tool.pip.PipRepository;
+import com.devonfw.tools.ide.tool.python.PythonRepository;
 import com.devonfw.tools.ide.tool.repository.DefaultToolRepository;
 import com.devonfw.tools.ide.tool.repository.ToolRepository;
-import com.devonfw.tools.ide.tool.python.PythonRepository;
 import com.devonfw.tools.ide.tool.uv.UvRepository;
 import com.devonfw.tools.ide.url.model.UrlMetadata;
 import com.devonfw.tools.ide.util.DateTimeUtil;
@@ -176,7 +181,17 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
 
   private WindowsHelper windowsHelper;
 
+  /** The replacement used to mask a secret in log output. */
+  private static final String SECRET_MASK = "********";
+
+  /** Minimum length of a value to be masked as a secret in log output. Masking a very short value would corrupt unrelated log messages. */
+  private static final int SECRET_MIN_LENGTH = 3;
+
   private final Map<String, String> privacyMap;
+
+  private final Set<String> secrets;
+
+  private final Set<String> secretVariables;
 
   private Path bash;
 
@@ -198,6 +213,8 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     this.startContext = startContext;
     this.startContext.setArgFormatter(this);
     this.privacyMap = new HashMap<>();
+    this.secrets = new HashSet<>();
+    this.secretVariables = new HashSet<>();
     this.systemInfo = SystemInfoImpl.INSTANCE;
     if (isTest()) {
       configureJavaUtilLogging(null);
@@ -424,7 +441,11 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     if (isPrivacyMode() && !WORKSPACE_MAIN.equals(wks)) {
       wks = "*".repeat(wks.length());
     }
-    return "IDE environment variables have been set for " + formatArgument(this.ideHome) + " in workspace " + wks;
+    String workspaceMessage = " with workspace set to " + wks;
+    if (!this.cwd.startsWith(this.workspacePath)) {
+      workspaceMessage += " (fallback to default)";
+    }
+    return "IDE environment variables have been set for " + formatArgument(this.ideHome) + workspaceMessage;
   }
 
   private String getMessageNotInsideIdeProject() {
@@ -683,29 +704,13 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
   public Path getSettingsGitRepository() {
 
     Path settingsPath = getSettingsPath();
+    RepositoryType settingsRepositoryType = RepositoryType.ofSettingsPath(settingsPath, this);
     // check whether the settings path has a .git folder only if its not a symbolic link or junction
-    if ((settingsPath != null) && !Files.exists(settingsPath.resolve(".git")) && !isSettingsCodeRepository()) {
+    if ((settingsPath != null) && !Files.exists(settingsPath.resolve(".git")) && !(settingsRepositoryType == RepositoryType.CODE_SETTINGS_COMBINED)) {
       LOG.error("Settings repository exists but is not a git repository.");
       return null;
     }
     return settingsPath;
-  }
-
-  @Override
-  public boolean isSettingsCodeRepository() {
-
-    Path settingsPath = getSettingsPath();
-    if (settingsPath != null) {
-      boolean settingsIsLink = Files.isSymbolicLink(settingsPath) || getFileAccess().isJunction(settingsPath);
-      if (settingsIsLink) {
-        Path realPath = getFileAccess().toRealPath(this.settingsPath);
-        if (realPath != null) {
-          return getGitContext().isGitRepo(realPath.getParent());
-        }
-        return true;
-      }
-    }
-    return false;
   }
 
   @Override
@@ -966,6 +971,29 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     return this.system;
   }
 
+  @Override
+  public void setEnvironmentOfInstalledTools(EnvironmentContext environmentContext) {
+
+    if (getSoftwarePath() == null) {
+      return;
+    }
+    for (AbstractCommandlet commandlet : getCommandletManager().getCommandlets()) {
+      if (commandlet instanceof AbstractLocalToolCommandlet tool) {
+        Path toolPath = tool.getToolPath();
+        // we cannot use isInstalled() here since it may spawn processes (e.g. "npm --version") what would be way too expensive.
+        if ((toolPath != null) && Files.isDirectory(toolPath)) {
+          try {
+            // for performance optimization, we do a hack here and assume that the installedVersion is never used by any setEnvironment method implementation.
+            ToolInstallation toolInstallation = new ToolInstallation(toolPath, toolPath, tool.getToolBinPath(), VersionIdentifier.LATEST, false);
+            tool.setEnvironment(environmentContext, toolInstallation, false);
+          } catch (Exception e) {
+            LOG.warn("Failed to set the environment variables of the installed tool {}.", tool.getName(), e);
+          }
+        }
+      }
+    }
+  }
+
   /**
    * @return a new instance of {@link ProcessContext}.
    * @see #newProcess()
@@ -1025,7 +1053,39 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
       }
       result = PrivacyUtil.removeSensitivePathInformation(result);
     }
+    // Secrets are masked independent of the privacy mode: a value the user entered as a secret or that belongs to a
+    // variable marked as secret must never appear in any log output. This is done here since formatArgument is the
+    // single place all log arguments pass through, so no individual log statement can be forgotten.
+    for (String secret : this.secrets) {
+      result = result.replace(secret, SECRET_MASK);
+    }
     return result;
+  }
+
+  @Override
+  public void addSecretVariable(String name) {
+
+    if ((name != null) && !name.isEmpty()) {
+      this.secretVariables.add(name);
+    }
+  }
+
+  @Override
+  public void addSecretValue(String name, String value) {
+
+    if (this.secretVariables.contains(name)) {
+      addSecret(value);
+    }
+  }
+
+  /**
+   * @param secret the secret value to mask in all log output. Ignored if {@code null} or shorter than {@link #SECRET_MIN_LENGTH}.
+   */
+  protected void addSecret(String secret) {
+
+    if ((secret != null) && (secret.length() >= SECRET_MIN_LENGTH)) {
+      this.secrets.add(secret);
+    }
   }
 
   /**
@@ -1057,6 +1117,27 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
   @Override
   public String askForInput(String message, String defaultValue) {
 
+    return ask(message, defaultValue, false);
+  }
+
+  @Override
+  public String askForSecret(String message, String defaultValue) {
+
+    return ask(message, defaultValue, true);
+  }
+
+  /**
+   * Asks the user for a value, re-asking while the input is empty and a default value is given.
+   *
+   * @param message the question to ask.
+   * @param defaultValue the value to return if the user accepts the default (by entering an empty value) or {@code null} to re-ask until a value is
+   *     entered.
+   * @param secret - {@code true} to read the input in a masked way (see {@link #readSecretLine()}) and to mask it in the log output, {@code false} to read
+   *     it as plain text.
+   * @return the entered value or the default value.
+   */
+  private String ask(String message, String defaultValue, boolean secret) {
+
     while (true) {
       if (!message.isBlank()) {
         IdeLogLevel.INTERACTION.log(LOG, message);
@@ -1068,11 +1149,18 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
           throw new CliAbortException();
         }
       }
-      String input = readLine().trim();
+      // for a secret the input is not trimmed so that a leading or trailing whitespace that is part of the password or a pasted token is preserved
+      String input = secret ? readSecretLine() : readLine().trim();
       if (!input.isEmpty()) {
+        if (secret) {
+          addSecret(input);
+        }
         return input;
       } else {
         if (defaultValue != null) {
+          if (secret) {
+            addSecret(defaultValue);
+          }
           return defaultValue;
         }
       }
@@ -1084,7 +1172,6 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
 
     assert (options.length > 0);
     IdeLogLevel.INTERACTION.log(LOG, question, args);
-    LOG.warn(question, args);
     return displayOptionsAndGetAnswer(options);
   }
 
@@ -1147,6 +1234,15 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
    */
   protected abstract String readLine();
 
+  /**
+   * @return the secret input from the end-user (e.g. read from the console without echoing it). The default implementation simply delegates to
+   *     {@link #readLine()} so that sub-classes without a secure console (e.g. in tests) work out of the box.
+   */
+  protected String readSecretLine() {
+
+    return readLine();
+  }
+
   private static <O> void addMapping(Map<String, O> mapping, String key, O option) {
 
     O duplicate = mapping.put(key, option);
@@ -1187,7 +1283,8 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
   }
 
   /**
-   * Finds the matching {@link Commandlet} to run, applies {@link CliArguments} to its {@link Commandlet#getProperties() properties} and will execute it.
+   * Finds the matching {@link AbstractCommandlet} to run, applies {@link CliArguments} to its {@link AbstractCommandlet#getProperties() properties} and will
+   * execute it.
    *
    * @param arguments the {@link CliArgument}.
    * @return the return code of the execution.
@@ -1202,8 +1299,8 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     assert (this.currentStep == null);
     boolean supressStepSuccess = false;
     StepImpl step = newStep(true, "ide", (Object[]) current.asArray());
-    Iterator<Commandlet> commandletIterator = this.commandletManager.findCommandlet(arguments, null);
-    Commandlet cmd = null;
+    Iterator<AbstractCommandlet> commandletIterator = this.commandletManager.findCommandlet(arguments, null);
+    AbstractCommandlet cmd = null;
     ValidationResult result = null;
     try {
       while (commandletIterator.hasNext()) {
@@ -1221,7 +1318,7 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
       if (commandKey == null || commandKey.isBlank()) {
         return 0;
       }
-      Commandlet commandletByName = this.commandletManager.getCommandlet(commandKey);
+      AbstractCommandlet commandletByName = this.commandletManager.getCommandlet(commandKey);
       // Missing commandlet
       if (commandletByName == null) {
         if (getCliSuggester().isMissingCommandletHandled(commandKey, step)) {
@@ -1250,6 +1347,16 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
       IdeLogLevel.INTERACTION.log(LOG, "For additional details run ide help {}", cmd == null ? "" : cmd.getName());
       return 1;
     } catch (Throwable t) {
+      if (cmd != null && cmd.isProcessableOutput()) {
+        // Processable output commandlets (auto-completion, env) write machine-consumed output to stdout. A failure
+        // there must not pollute that output with an error block and "file a bug" screen — so we record the failure
+        // (step.error still logs "Step ... ended with failure" for step tracking) and fail quietly instead of
+        // rethrowing, which would make Ideasy.run() log the error at ERROR level into the captured output.
+        step.error(t, true);
+        return 1;
+      }
+      // Do not activate logging for processable output commandlets (e.g. CompleteCommandlet) — errors would appear
+      // in the terminal as completion suggestions to the user.
       activateLogging(cmd);
       step.error(t, true);
       if (this.logfile != null) {
@@ -1278,7 +1385,7 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
   /**
    * Ensure the logging system is initialized.
    */
-  private void activateLogging(Commandlet cmd) {
+  private void activateLogging(AbstractCommandlet cmd) {
 
     configureJavaUtilLogging(cmd);
     this.startContext.activateLogging();
@@ -1287,9 +1394,9 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
   /**
    * Configures the logging system (JUL).
    *
-   * @param cmd the {@link Commandlet} to be called. May be {@code null}.
+   * @param cmd the {@link AbstractCommandlet} to be called. May be {@code null}.
    */
-  public void configureJavaUtilLogging(Commandlet cmd) {
+  public void configureJavaUtilLogging(AbstractCommandlet cmd) {
 
     if (this.julConfigured) {
       return;
@@ -1310,7 +1417,7 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     }
   }
 
-  protected boolean isWriteLogfile(Commandlet cmd) {
+  protected boolean isWriteLogfile(AbstractCommandlet cmd) {
     if ((cmd == null) || !cmd.isWriteLogFile()) {
       return false;
     }
@@ -1318,7 +1425,7 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     return Boolean.TRUE.equals(writeLogfile);
   }
 
-  private Properties createJavaUtilLoggingProperties(boolean writeLogfile, Commandlet cmd) {
+  private Properties createJavaUtilLoggingProperties(boolean writeLogfile, AbstractCommandlet cmd) {
 
     Path idePath = getIdePath();
     if (writeLogfile && (idePath == null)) {
@@ -1345,7 +1452,7 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     return properties;
   }
 
-  private Path createLogfilePath(Path idePath, Commandlet cmd) {
+  private Path createLogfilePath(Path idePath, AbstractCommandlet cmd) {
     LocalDateTime now = LocalDateTime.now();
     Path logsPath = idePath.resolve(FOLDER_LOGS).resolve(DateTimeUtil.formatDate(now, true));
     StringBuilder sb = new StringBuilder(32);
@@ -1374,11 +1481,12 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
   }
 
   /**
-   * @param cmd the potential {@link Commandlet} to {@link #apply(CliArguments, Commandlet) apply} and {@link Commandlet#run() run}.
-   * @return {@code true} if the given {@link Commandlet} matched and did {@link Commandlet#run() run} successfully, {@code false} otherwise (the
-   *     {@link Commandlet} did not match and we have to try a different candidate).
+   * @param cmd the potential {@link AbstractCommandlet} to {@link #apply(CliArguments, AbstractCommandlet) apply} and
+   *     {@link AbstractCommandlet#run() run}.
+   * @return {@code true} if the given {@link AbstractCommandlet} matched and did {@link AbstractCommandlet#run() run} successfully, {@code false} otherwise
+   *     (the {@link AbstractCommandlet} did not match and we have to try a different candidate).
    */
-  private ValidationResult applyAndRun(CliArguments arguments, Commandlet cmd) {
+  private ValidationResult applyAndRun(CliArguments arguments, AbstractCommandlet cmd) {
 
     IdeLogLevel previousLogLevel = null;
     cmd.reset();
@@ -1442,12 +1550,13 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
    * determines the correct message to log, depending on whether the settings repository is a symlink/junction, or not. Should the user already be running the
    * appropriate {@code ide update} command, the message is suppressed to avoid confusion.
    *
-   * @param cmd the {@link Commandlet}.
+   * @param cmd the {@link AbstractCommandlet}.
    * @return {@code msg} to log to the console. {@code null} if the message is suppressed.
    */
-  private String determineSettingsUpdateMessage(Commandlet cmd) {
+  private String determineSettingsUpdateMessage(AbstractCommandlet cmd) {
     boolean update = cmd instanceof UpdateCommandlet;
-    if (isSettingsCodeRepository()) {
+    RepositoryType settingsRepositoryType = RepositoryType.ofSettingsPath(getSettingsPath(), this);
+    if (settingsRepositoryType == RepositoryType.CODE_SETTINGS_COMBINED) {
       if (update && (isForceMode() || isForcePull())) {
         return null;
       }
@@ -1460,7 +1569,7 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     }
   }
 
-  private boolean ensureLicenseAgreement(Commandlet cmd) {
+  private boolean ensureLicenseAgreement(AbstractCommandlet cmd) {
 
     if (isTest()) {
       return true; // ignore for tests
@@ -1543,9 +1652,8 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
    * @param includeContextOptions to include the options of {@link ContextCommandlet}.
    * @return the {@link List} of {@link CompletionCandidate}s to suggest.
    */
-  public List<CompletionCandidate> complete(CliArguments arguments, boolean includeContextOptions) {
+  public List<CompletionCandidate> complete(CliArguments arguments, CompletionCandidateCollector collector, boolean includeContextOptions) {
 
-    CompletionCandidateCollector collector = new CompletionCandidateCollectorDefault(this);
     if (arguments.current().isStart()) {
       arguments.next();
     }
@@ -1556,14 +1664,14 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
         property.apply(arguments, this, cc, collector);
       }
     }
-    Iterator<Commandlet> commandletIterator = this.commandletManager.findCommandlet(arguments, collector);
+    Iterator<AbstractCommandlet> commandletIterator = this.commandletManager.findCommandlet(arguments, collector);
     CliArgument current = arguments.current();
     if (current.isCompletion() && current.isCombinedShortOption()) {
       collector.add(current.get(), null, null, null);
     }
     arguments.next();
     while (commandletIterator.hasNext()) {
-      Commandlet cmd = commandletIterator.next();
+      AbstractCommandlet cmd = commandletIterator.next();
       if (!arguments.current().isEnd()) {
         completeCommandlet(arguments.copy(), cmd, collector);
       }
@@ -1592,9 +1700,10 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
     return valueProperty;
   }
 
-  private void completeCommandlet(CliArguments arguments, Commandlet cmd, CompletionCandidateCollector collector) {
+  private void completeCommandlet(CliArguments arguments, AbstractCommandlet cmd, CompletionCandidateCollector collector) {
 
     LOG.trace("Trying to match arguments for auto-completion for commandlet {}", cmd.getName());
+
     Iterator<Property<?>> valueIterator = cmd.getValues().iterator();
     valueIterator.next(); // skip first property since this is the keyword property that already matched to find the commandlet
     Property<?> currentValueProperty = nextValueProperty(valueIterator, arguments);
@@ -1656,10 +1765,10 @@ public abstract class AbstractIdeContext implements IdeContext, IdeLogArgFormatt
   /**
    * @param arguments the {@link CliArguments} to apply. Will be {@link CliArguments#next() consumed} as they are matched. Consider passing a
    *     {@link CliArguments#copy() copy} as needed.
-   * @param cmd the potential {@link Commandlet} to match.
+   * @param cmd the potential {@link AbstractCommandlet} to match.
    * @return the {@link ValidationResult} telling if the {@link CliArguments} can be applied successfully or if validation errors ocurred.
    */
-  public ValidationResult apply(CliArguments arguments, Commandlet cmd) {
+  public ValidationResult apply(CliArguments arguments, AbstractCommandlet cmd) {
 
     LOG.trace("Trying to match arguments to commandlet {}", cmd.getName());
     CliArgument currentArgument = arguments.current();
