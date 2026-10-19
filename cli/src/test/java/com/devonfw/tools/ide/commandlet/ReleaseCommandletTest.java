@@ -91,6 +91,23 @@ class ReleaseCommandletTest extends AbstractIdeContextTest {
     context.setCwd(context.getWorkspacePath().resolve("empty"), context.getWorkspacePath().toString(), context.getIdeHome());
     ReleaseCommandlet releaseCommandlet = context.getCommandletManager().getCommandlet(ReleaseCommandlet.class);
 
-    assertThrows(CliException.class, releaseCommandlet::run);
+    CliException exception = assertThrows(CliException.class, releaseCommandlet::run);
+    assertThat(exception).hasMessageContaining("Could not find a build descriptor");
+  }
+
+  /**
+   * Tests that the release fails gracefully if a build descriptor is found but its {@link com.devonfw.tools.ide.tool.BuildTool} does not support releasing
+   * (its {@link com.devonfw.tools.ide.tool.BuildTool#getProjectVersion(java.nio.file.Path) getProjectVersion} returns {@code null}), e.g. a gradle project
+   * (only maven currently supports releasing).
+   */
+  @Test
+  void testReleaseWithUnsupportedBuildToolThrowsException() {
+
+    IdeTestContext context = newReleaseContext(false);
+    context.setCwd(context.getWorkspacePath().resolve("gradle"), context.getWorkspacePath().toString(), context.getIdeHome());
+    ReleaseCommandlet releaseCommandlet = context.getCommandletManager().getCommandlet(ReleaseCommandlet.class);
+
+    CliException exception = assertThrows(CliException.class, releaseCommandlet::run);
+    assertThat(exception).hasMessageContaining("gradle").hasMessageContaining("does not support releasing");
   }
 }
