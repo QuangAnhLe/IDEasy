@@ -182,7 +182,8 @@ public interface GitContext {
    *
    * @param repository the {@link Path} to the target folder where the git repository should be cloned or pulled. It is not the parent directory where git
    *     will by default create a sub-folder by default on clone but the final folder that will contain the ".git" subfolder.
-   * @param remote the name of the remote repository, e.g., "origin". If {@code null} or empty, the default remote name "origin" will be used.
+   * @param remote the name of the remote repository, e.g., "origin". If {@code null}, the remote is determined from the upstream of the current branch and
+   *     if none is configured, all remotes are fetched via {@code git fetch --all}.
    * @param branch the name of the branch to check for updates.
    */
   void fetch(Path repository, String remote, String branch);
@@ -240,10 +241,13 @@ public interface GitContext {
   String determineCurrentBranch(Path repository);
 
   /**
+   * Determines the remote that the branch of the given repository tracks (as configured via {@code branch.<branch>.remote}). This is the same remote that
+   * {@link #isRepositoryUpdateAvailable(Path)} reads via {@code git rev-parse @{u}}.
+   *
    * @param repository the {@link Path} to the folder where the git repository is located.
-   * @return the name of the default origin.
+   * @return the name of the tracked remote (e.g. "origin") or {@code null} if the current branch has no upstream configured or no branch is checked out.
    */
-  String determineRemote(Path repository);
+  String determineTrackedRemote(Path repository);
 
   /**
    * Saves the current git commit ID of a repository to a file given as an argument.
@@ -296,7 +300,36 @@ public interface GitContext {
    * Pushes the local commits of the given repository to the remote repository.
    *
    * @param repository the {@link Path} to the git repository.
-   * @param followTags {@code true} to also push annotated tags reachable from the pushed commits (git push --follow-tags), {@code false} to push commits only.
+   * @param followTags {@code true} to also push annotated tags reachable from the pushed commits (git push --follow-tags), {@code false} to push commits
+   *     only.
    */
   void push(Path repository, boolean followTags);
+
+  /**
+   * Adds a new git remote to the given repository using {@code git remote add}.
+   *
+   * @param repository the {@link Path} to the git repository.
+   * @param name the name of the remote to add (e.g. "upstream").
+   * @param url the URL of the remote to add.
+   */
+  void addRemote(Path repository, String name, String url);
+
+  /**
+   * Adds a new git remote to the given repository using {@code git remote add}. If the remote already exists with a different URL, an
+   * {@link IllegalStateException} is thrown instead of silently overriding it.
+   *
+   * @param repository the {@link Path} to the git repository.
+   * @param name the name of the remote to add (e.g. "upstream").
+   * @param url the URL of the remote to add.
+   * @throws IllegalStateException if the remote already exists with a different URL.
+   */
+  void addRemoteOrFail(Path repository, String name, String url);
+
+  /**
+   * Find the root of the git repository
+   *
+   * @param repository the {@link Path} to the git repository.
+   * @return the {@link Path} to the repository root
+   */
+  Path findRepositoryRoot(Path repository);
 }

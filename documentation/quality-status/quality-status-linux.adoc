@@ -9,13 +9,13 @@ Automatically generated open issue overview for Linux.
 
 link:quality-status.adoc[Back to overview]
 
-*Total Issues:* 141
+*Total Issues:* 203
 
-* OS-specific: 6
+* OS-specific: 5
 
 * Multi-OS: 1
 
-* Cross-platform: 134
+* Cross-platform: 197
 
 == Linux Specific Issues
 
@@ -24,16 +24,18 @@ link:quality-status.adoc[Back to overview]
 | Issue | Summary
 2+^| *11-30 days*
 
-| link:https://github.com/devonfw/IDEasy/issues/2007[#2007]
-| IDEasy can not install docker on arch linux
+| link:https://github.com/devonfw/IDEasy/issues/2726[#2726]
+| Docker Desktop installation fails on Linux
+
+2+^| *31-60 days*
+
+| link:https://github.com/devonfw/IDEasy/issues/2544[#2544]
+| Native package manager commands inherit IDEasy tool environment
 
 2+^| *90+ days*
 
 | link:https://github.com/devonfw/IDEasy/issues/1352[#1352]
 | VSCode WSL warning prompt blocking VSCode plugin installation
-
-| link:https://github.com/devonfw/IDEasy/issues/1046[#1046]
-| Add Support for Python on Linux
 
 | link:https://github.com/devonfw/IDEasy/issues/950[#950]
 | avoid --no-gpg-checks for docker installation on SUSE Linux
@@ -41,22 +43,19 @@ link:quality-status.adoc[Back to overview]
 | link:https://github.com/devonfw/IDEasy/issues/854[#854]
 | Kubectl not working on linux
 
-| link:https://github.com/devonfw/IDEasy/issues/694[#694]
-| Add linux support to dotnet tool
-
 |===
 
 == Multi-OS Issues
 
-=== Linux + macOS (1)
+=== Linux + Windows + macOS (1)
 
 [%header, cols="^1,7"]
 |===
 | Issue | Summary
-2+^| *90+ days*
+2+^| *61-90 days*
 
-| link:https://github.com/devonfw/IDEasy/issues/802[#802]
-| az not working on Mac
+| link:https://github.com/devonfw/IDEasy/issues/2464[#2464]
+| Add unit tests for `OperatingSystem`
 
 |===
 

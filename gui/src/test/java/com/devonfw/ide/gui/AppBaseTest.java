@@ -3,99 +3,131 @@ package com.devonfw.ide.gui;
 import static org.testfx.assertions.api.Assertions.assertThat;
 import static org.testfx.util.WaitForAsyncUtils.waitForFxEvents;
 
-import java.io.IOException;
-import java.net.URL;
 import java.nio.file.Path;
-import java.util.Arrays;
 import java.util.Locale;
 
-import javafx.fxml.FXMLLoader;
-import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.SplitPane;
+import javafx.scene.control.SplitPane.Divider;
+import javafx.scene.control.TabPane;
+import javafx.scene.control.ToggleButton;
 import javafx.scene.input.MouseEvent;
+import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 
-import org.junit.jupiter.api.BeforeAll;
+import org.assertj.core.data.Offset;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import com.devonfw.ide.gui.context.GuiStateManager;
-import com.devonfw.ide.gui.context.TaskManager;
-import com.devonfw.ide.gui.nls.NlsService;
-import com.devonfw.ide.gui.progress.ProgressBarTask;
-import com.devonfw.ide.gui.progress.taskwindow.TaskOverviewWindow;
+import com.devonfw.ide.gui.core.context.GuiStateManager;
+import com.devonfw.ide.gui.core.context.TaskManager;
+import com.devonfw.ide.gui.core.helper.FxHelper;
+import com.devonfw.ide.gui.core.mainwindow.MainWindowView;
+import com.devonfw.ide.gui.core.mainwindow.MainWindowViewModel;
+import com.devonfw.ide.gui.core.progress.ProgressBarTask;
+import com.devonfw.ide.gui.core.progress.taskwindow.TaskOverviewWindow;
+import com.devonfw.tools.ide.context.IdeTestContext;
+import com.devonfw.tools.ide.environment.IdeSystemTestImpl;
 
 /**
- * Basic UI Test
+ * Basic UI Test for the main screen
  */
-public class AppBaseTest extends HeadlessApplicationTest {
+public class AppBaseTest extends UIBasedApplicationTest {
 
-  private static final Logger LOGGER = LoggerFactory.getLogger(AppBaseTest.class);
+  /** Scene size for the test window. The console SplitPane needs real space, or its divider stays pinned near 1.0. */
+  private static final double SCENE_WIDTH = 1280;
+
+  private static final double SCENE_HEIGHT = 800;
 
   private Button androidStudioOpen, eclipseOpen, intellijOpen, vsCodeOpen;
+  /** The four IDE open buttons, for asserting their enabled/disabled state in bulk. */
+  private Button[] ideOpenButtons;
+  private ToggleButton consolePaneToggleButton;
   private ComboBox<String> selectedProject, selectedWorkspace;
   private Label statusText;
   private ProgressBar taskProgressBar;
+  private SplitPane centerSplitPane;
+  private TabPane tabPane;
+  private StackPane welcomePane;
+  private Label welcomeLabel;
+  private Label welcomeSubtitle;
+  private Button openLauncherButton;
 
+  /**
+   * Both are recreated for every test in {@link #start(Stage)}: a shared GuiStateManager leaks the project selection into the next test, and a shared
+   * TaskManager accumulates a status-bar listener per view model, so discarded windows keep reacting to task changes.
+   */
+  private TaskManager taskManager;
+
+  private GuiStateManager guiStateManager;
+
+  private MainWindowViewModel viewModel;
+
+  private MainWindowView mainWindow;
+
+  /** Throw-away user home for the isolated NlsService context so the persisted locale never rewrites the real {@code ~/.ide/ide.properties}. */
   @TempDir
-  private static Path mockIdeRoot;
-
-  private static final TaskManager taskManager = new TaskManager();
-  private static GuiStateManager guiStateManager;
+  private static Path nlsUserHome;
 
   @Override
-  public void start(Stage stage) throws IOException {
+  public void start(Stage stage) {
 
-    NlsService nlsService = new NlsService(Locale.ENGLISH);
+    // We simply use project-0 here, as we only use the ide root for this test
+    setTestContext("testProject", "project-0");
 
-    URL mainViewUrl = getClass().getResource("main-view.fxml");
-    assertThat(mainViewUrl).as("Cannot resolve main UI FXML resource!").isNotNull();
-
-    FXMLLoader fxmlLoader = new FXMLLoader(mainViewUrl);
-    fxmlLoader.setController(new MainController(mockIdeRoot.toString(), guiStateManager, nlsService));
-    fxmlLoader.setResources(nlsService.getResourceBundle());
-    Parent root = fxmlLoader.load();
-    stage.setScene(new Scene(root));
+    // isolate the NlsService from the developer's real user home and the IDE_OPTIONS environment variable: persisting the locale must not rewrite the
+    // real ~/.ide/ide.properties, so point an isolated IdeTestContext at a throw-away home and hand it to the NlsService via the state manager
+    final IdeTestContext nlsContext = new IdeTestContext();
+    nlsContext.setSystem(new IdeSystemTestImpl());
+    nlsContext.setUserHome(nlsUserHome);
+    this.guiStateManager = new GuiStateManager(getTestContext().getIdeRoot().toString(), nlsContext);
+    this.guiStateManager.getNlsService().setLocale(Locale.ENGLISH);
+    this.taskManager = guiStateManager.getTaskManager();
+    this.viewModel = new MainWindowViewModel(guiStateManager);
+    this.mainWindow = new MainWindowView(this.viewModel, guiStateManager);
+    stage.setScene(new Scene(mainWindow, SCENE_WIDTH, SCENE_HEIGHT));
     stage.requestFocus(); //sometimes needed for headless setup to work
     stage.show();
 
-    androidStudioOpen = (Button) root.lookup("#androidStudioOpen");
-    eclipseOpen = (Button) root.lookup("#eclipseOpen");
-    intellijOpen = (Button) root.lookup("#intellijOpen");
-    vsCodeOpen = (Button) root.lookup("#vsCodeOpen");
-    selectedProject = (ComboBox<String>) root.lookup("#selectedProject");
-    selectedWorkspace = (ComboBox<String>) root.lookup("#selectedWorkspace");
-    statusText = (Label) root.lookup("#statusLabel");
-    taskProgressBar = (ProgressBar) root.lookup("#statusProgressBar");
-  }
-
-  /**
-   * Generate temporary project directories to be able to test on any device (including GitHub CI). This is required for the {@link MainController} to work in
-   * the test context. Generates a structure like this: /project-[0..6]/workspaces/main
-   */
-  @BeforeAll
-  public static void generateProjectFolderStructure() throws IOException {
-
-    LOGGER.debug("tempDir: {}", mockIdeRoot);
-    FakeProjectFolderStructureHelper.createFakeProjectFolderStructure(mockIdeRoot);
-    LOGGER.debug("project folders: {}", Arrays.toString(mockIdeRoot.toFile().list()));
-
-    guiStateManager = new GuiStateManager(taskManager, mockIdeRoot.toString());
-    //We set the project root directory to the temporary directory before all tests so that the IDE can find the projects in the test.
-    guiStateManager.switchContext("project-1", "main");
+    selectedProject = FxHelper.lookup(mainWindow, "#projects");
+    selectedWorkspace = FxHelper.lookup(mainWindow, "#workspaces");
+    consolePaneToggleButton = FxHelper.lookup(mainWindow, "#consolePaneToggleButton");
+    centerSplitPane = FxHelper.lookup(mainWindow, "#centerSplitPane");
+    statusText = FxHelper.lookup(mainWindow, "#statusLabel");
+    taskProgressBar = FxHelper.lookup(mainWindow, "#statusProgressBar");
+    tabPane = FxHelper.lookup(mainWindow, "#tabPane");
+    welcomePane = FxHelper.lookup(mainWindow, "#welcomePane");
+    welcomeLabel = FxHelper.lookup(mainWindow, "#welcomeLabel");
+    welcomeSubtitle = FxHelper.lookup(mainWindow, "#welcomeSubtitle");
+    openLauncherButton = FxHelper.lookup(mainWindow, "#openLauncherButton");
   }
 
   @BeforeEach
   protected void resetTaskManager() {
 
-    taskManager.getTasks().clear();
+    taskManager.clearTasks();
+    waitForFxEvents();
+  }
+
+  /**
+   * The application starts on the welcome pane without any open tab. The IDE open buttons live in the launcher tab, so it has to be opened before they can be
+   * looked up.
+   */
+  private void openLauncherTab() {
+
+    interact(() -> this.viewModel.openLauncherTab());
+    waitForFxEvents();
+
+    androidStudioOpen = FxHelper.lookup(this.mainWindow, "#androidStudioOpen");
+    eclipseOpen = FxHelper.lookup(this.mainWindow, "#eclipseOpen");
+    intellijOpen = FxHelper.lookup(this.mainWindow, "#intellijOpen");
+    vsCodeOpen = FxHelper.lookup(this.mainWindow, "#vsCodeOpen");
+    this.ideOpenButtons = new Button[] { androidStudioOpen, eclipseOpen, intellijOpen, vsCodeOpen };
   }
 
   /**
@@ -119,11 +151,13 @@ public class AppBaseTest extends HeadlessApplicationTest {
   @Test
   public void testIdeOpenButtonsDisabledWhenNoProjectSelected() {
 
+    openLauncherTab();
+
     // assert that no project is selected
     assertThat(selectedProject.getValue()).isNull();
 
     // assert all IDE open buttons are disabled
-    for (Button button : new Button[] { androidStudioOpen, eclipseOpen, intellijOpen, vsCodeOpen }) {
+    for (Button button : ideOpenButtons) {
       assertThat(button.isDisabled()).as(button.getId() + " button should be disabled when no project has been selected").isTrue();
     }
   }
@@ -134,14 +168,46 @@ public class AppBaseTest extends HeadlessApplicationTest {
   @Test
   public void testIdeOpenButtonsEnabledWhenWorkspaceSelected() {
 
+    openLauncherTab();
+
     // assert that a project and workspace is selected
     interact(() -> selectedProject.getSelectionModel().select("project-1"));
     interact(() -> selectedWorkspace.getSelectionModel().select("main"));
 
     // assert all IDE open buttons are enabled
-    for (Button button : new Button[] { androidStudioOpen, eclipseOpen, intellijOpen, vsCodeOpen }) {
+    for (Button button : ideOpenButtons) {
       assertThat(button.isDisabled()).as(button.getId() + " button should be enabled when a workspace has been selected").isFalse();
     }
+  }
+
+  /**
+   * This test ensures that switching to a project will auto-select the main workspace
+   */
+  @Test
+  public void testSwitchingProjectResetsWorkspaceSelectionToMain() {
+
+    openLauncherTab();
+
+    // select a project and its workspace -> all IDE open buttons become enabled
+    interact(() -> selectedProject.getSelectionModel().select("project-1"));
+    interact(() -> selectedWorkspace.getSelectionModel().select("main"));
+
+    for (Button button : ideOpenButtons) {
+      assertThat(button.isDisabled()).as(button.getId() + " button should be enabled when a project and workspace are selected").isFalse();
+    }
+
+    // switch to another project -> the workspace selection must be reset and the IDE open buttons disabled again
+    interact(() -> selectedProject.getSelectionModel().select("project-2"));
+
+    assertThat(selectedWorkspace.getValue()).as("Workspace selection should be reset when switching to a different project").isEqualTo("main");
+
+    for (Button button : ideOpenButtons) {
+      assertThat(button.isDisabled())
+          .as(button.getId() + " button should be disabled after switching to a new project without a selected workspace").isFalse();
+    }
+
+    assertThat(guiStateManager.getCurrentContext().getCwd().endsWith(Path.of("project-2", "workspaces", "main")))
+        .as("Context should point to the main workspace of the newly selected project").isTrue();
   }
 
   @Test
@@ -150,10 +216,10 @@ public class AppBaseTest extends HeadlessApplicationTest {
     ProgressBarTask task1 = new ProgressBarTask(taskManager, "task-1", "Test Task");
     ProgressBarTask task2 = new ProgressBarTask(taskManager, "task-2", "Test Task");
 
-    //Case 1: No tasks added yet, check correct message
+    // Case 1: No tasks added yet, check correct message
     assertThat(statusText.getText()).isEqualTo("IDEasy is ready.");
 
-    //Case 2: Only single task exists, should display the task title and a progress bar next to the label
+    // Case 2: Only single task exists, should display the task title and a progress bar next to the label
     taskManager.addTask(task1);
     waitForFxEvents();
 
@@ -166,7 +232,7 @@ public class AppBaseTest extends HeadlessApplicationTest {
     );
     assertThat(taskProgressBar.isVisible()).as("Task progress bar should be visible").isTrue();
 
-    //Case 3: Multiple tasks exist, should display the number of tasks and a progress bar next to the label
+    // Case 3: Multiple tasks exist, should display the number of tasks and a progress bar next to the label
     taskManager.addTask(task2);
     waitForFxEvents();
 
@@ -174,7 +240,7 @@ public class AppBaseTest extends HeadlessApplicationTest {
     assertThat(taskProgressBar.isVisible()).as("Task progress bar should not be visible").isFalse();
 
     //...and back to the default state:
-    taskManager.getTasks().clear();
+    taskManager.clearTasks();
     waitForFxEvents();
 
     assertThat(statusText.getText()).isEqualTo("IDEasy is ready.");
@@ -187,13 +253,153 @@ public class AppBaseTest extends HeadlessApplicationTest {
     ProgressBarTask task2 = new ProgressBarTask(taskManager, "task-2", "Test Task");
 
     taskManager.addTask(task1);
+    waitForFxEvents();
     taskManager.addTask(task2);
     waitForFxEvents();
 
-    interact(() -> statusText.fireEvent(
-        new MouseEvent(MouseEvent.MOUSE_CLICKED, 0, 0, 0, 0, null, 1, false, false, false, false, false, false, false, false, false, false, null)));
+    interact(this::clickStatusText);
 
     assertThat(TaskOverviewWindow.getInstance(taskManager).getStage().isShowing()).as("Task overview window should be opened when clicking on status text")
         .isTrue();
+  }
+
+  /**
+   * The status label now carries a permanently installed click handler that is gated on the view model's clickable state, where it previously had the handler
+   * attached only while more than one task was running. This pins that gate.
+   */
+  @Test
+  protected void testStatusTextDoesNotOpenTaskOverviewWindowForSingleTask() {
+
+    // The window is a JVM-wide singleton, so an earlier test may have left it showing. getInstance builds the Stage, so it has to run on the FX thread.
+    interact(() -> TaskOverviewWindow.getInstance(this.taskManager).getStage().hide());
+
+    this.taskManager.addTask(new ProgressBarTask(this.taskManager, "task-1", "Test Task"));
+    waitForFxEvents();
+
+    interact(this::clickStatusText);
+
+    assertThat(TaskOverviewWindow.getInstance(this.taskManager).getStage().isShowing())
+        .as("Task overview window should not open while only a single task is running").isFalse();
+  }
+
+  //===Console panel tests===
+
+  /**
+   * The pre-launch action registered on the TabFactory opens the console by calling {@code setConsoleVisible(true)} on the view model. Launching a commandlet
+   * for real would install an IDE, so this covers the mechanism that action drives rather than the launch itself.
+   */
+  @Test
+  void testConsoleOpensWhenRequestedThroughTheViewModel() {
+
+    Divider mainPanelDivider = centerSplitPane.getDividers().getFirst();
+    assertThat(mainPanelDivider.getPosition()).as("The console should start collapsed").isGreaterThan(0.99);
+
+    interact(() -> this.viewModel.setConsoleVisible(true));
+    waitForFxEvents();
+
+    assertThat(mainPanelDivider.getPosition()).as("Console panel should be extended when the view model requests it").isEqualTo(0.75, Offset.offset(0.01));
+    assertThat(consolePaneToggleButton.isSelected()).as("The toggle button should follow the view model").isTrue();
+  }
+
+  /**
+   * Dragging the divider must not be fought by the view writing the position back. Crossing the visible threshold used to snap the divider straight to 0.75.
+   */
+  @Test
+  void testDraggingDividerDoesNotSnapTheConsoleOpen() {
+
+    Divider mainPanelDivider = centerSplitPane.getDividers().getFirst();
+
+    // Just past the point where the console counts as visible, as if the user were dragging it open.
+    interact(() -> mainPanelDivider.setPosition(0.985));
+    waitForFxEvents();
+
+    assertThat(mainPanelDivider.getPosition()).as("The divider must stay where the drag put it").isEqualTo(0.985, Offset.offset(0.001));
+    assertThat(consolePaneToggleButton.isSelected()).as("The console counts as visible past the threshold").isTrue();
+  }
+
+  @Test
+  void testConsoleToggleButton() {
+
+    Divider mainPanelDivider = centerSplitPane.getDividers().getFirst();
+
+    // open the console (for some reason, clickOn(toggleButton) does not work properly here)
+    consolePaneToggleButton.fire();
+    waitForFxEvents();
+
+    assertThat(consolePaneToggleButton.isSelected()).isTrue();
+    assertThat(mainPanelDivider.getPosition()).as("Console panel should be extended when opening the console").isEqualTo(0.75, Offset.offset(0.01));
+
+    // close the console
+    consolePaneToggleButton.fire();
+    waitForFxEvents();
+
+    assertThat(consolePaneToggleButton.isSelected()).isFalse();
+    assertThat(mainPanelDivider.getPosition()).isGreaterThan(0.99);
+  }
+
+  /**
+   * Fires a mouse click on the status label. The status label's click handler opens the task overview window when more than one task is running.
+   */
+  private void clickStatusText() {
+    statusText.fireEvent(
+        new MouseEvent(MouseEvent.MOUSE_CLICKED, 0, 0, 0, 0, null, 1, false, false, false, false, false, false, false, false, false, false, null));
+  }
+
+  //===Welcome pane tests===
+
+  /**
+   * The application starts without any open tab, so the welcome pane must be visible and the empty tab pane hidden.
+   */
+  @Test
+  void testWelcomePaneShownOnStartup() {
+
+    assertThat(tabPane.getTabs()).as("No tab should be open on startup").isEmpty();
+    assertThat(welcomePane.isVisible()).as("The welcome pane should be visible on startup").isTrue();
+    assertThat(tabPane.isVisible()).as("The empty tab pane should be hidden on startup").isFalse();
+    assertThat(welcomeLabel.getText()).isEqualTo("Welcome to IDEasy");
+    assertThat(welcomeSubtitle.getText()).isEqualTo("Select where you want to start:");
+  }
+
+  /**
+   * Opening a tab must hide the welcome pane and show the tab pane.
+   */
+  @Test
+  void testWelcomePaneHiddenWhileTabIsOpen() {
+
+    openLauncherTab();
+
+    assertThat(tabPane.getTabs()).as("The launcher tab should be open").hasSize(1);
+    assertThat(welcomePane.isVisible()).as("The welcome pane should be hidden while a tab is open").isFalse();
+    assertThat(tabPane.isVisible()).as("The tab pane should be visible while a tab is open").isTrue();
+  }
+
+  /**
+   * Closing all tabs must reveal the welcome pane and hide the empty tab pane, so its header cannot cover the welcome pane.
+   */
+  @Test
+  void testWelcomePaneShownWhenAllTabsClosed() {
+
+    openLauncherTab();
+    interact(() -> tabPane.getTabs().clear());
+    waitForFxEvents();
+
+    assertThat(welcomePane.isVisible()).as("The welcome pane should be visible when no tab is open").isTrue();
+    assertThat(tabPane.isVisible()).as("The empty tab pane should be hidden").isFalse();
+    assertThat(welcomeLabel.getText()).isEqualTo("Welcome to IDEasy");
+  }
+
+  /**
+   * The button on the welcome pane must open the IDE launcher tab and hide the welcome pane again.
+   */
+  @Test
+  void testWelcomeButtonOpensLauncherTab() {
+
+    interact(() -> openLauncherButton.fire());
+    waitForFxEvents();
+
+    assertThat(tabPane.getTabs()).as("The welcome button should open exactly one tab").hasSize(1);
+    assertThat(tabPane.getTabs().getFirst().getUserData()).as("The opened tab should be the IDE launcher").isEqualTo("tab.ide_launcher");
+    assertThat(welcomePane.isVisible()).as("The welcome pane should be hidden again once a tab is open").isFalse();
+
   }
 }

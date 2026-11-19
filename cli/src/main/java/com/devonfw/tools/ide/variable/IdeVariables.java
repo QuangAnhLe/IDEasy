@@ -7,6 +7,7 @@ import java.util.List;
 
 import com.devonfw.tools.ide.context.IdeContext;
 import com.devonfw.tools.ide.git.GitUrlSyntax;
+import com.devonfw.tools.ide.tool.AbstractToolCommandlet;
 
 /**
  * Interface (mis)used to define all the available variables.
@@ -21,6 +22,12 @@ public interface IdeVariables {
 
   /** {@link VariableDefinition} for {@link com.devonfw.tools.ide.context.IdeContext#getUserHome() HOME}. */
   VariableDefinitionPath HOME = new VariableDefinitionPath("HOME", null, IdeContext::getUserHome, true);
+
+  /**
+   * {@link VariableDefinition} for the login name of the current user. Linux and macOS provide this as environment variable while Windows provides USERNAME
+   * instead, which is therefore used as fallback so that {@code $[USER]} works cross-platform.
+   */
+  VariableDefinitionString USER = new VariableDefinitionString("USER", null, c -> c.getSystem().getEnv("USERNAME"));
 
   /** {@link VariableDefinition} for {@link com.devonfw.tools.ide.context.IdeContext#getWorkspaceName() WORKSPACE}. */
   VariableDefinitionString WORKSPACE = new VariableDefinitionString("WORKSPACE", null, IdeContext::getWorkspaceName, true);
@@ -62,8 +69,7 @@ public interface IdeVariables {
   VariableDefinitionPath M2_REPO = new VariableDefinitionPath("M2_REPO", null, IdeVariables::getMavenRepositoryPath, false, true);
 
   /**
-   * {@link VariableDefinition} for {@link com.devonfw.tools.ide.tool.ToolCommandlet#getConfiguredEdition() edition} of
-   * {@link com.devonfw.tools.ide.tool.docker.Docker docker}.
+   * {@link VariableDefinition} for {@link AbstractToolCommandlet#getConfiguredEdition() edition} of {@link com.devonfw.tools.ide.tool.docker.Docker docker}.
    */
   VariableDefinitionString DOCKER_EDITION = new VariableDefinitionString("DOCKER_EDITION", null, c -> "rancher");
 
@@ -114,6 +120,20 @@ public interface IdeVariables {
   VariableDefinitionBoolean IDE_WRITE_LOGFILE = new VariableDefinitionBoolean("IDE_WRITE_LOGFILE", null,
       c -> Boolean.TRUE);
 
+  /**
+   * {@link VariableDefinition} that controls if the GUI desktop shortcut is created when IDEasy gets installed on Windows. Set by the checkbox of the MSI
+   * installer.
+   */
+  VariableDefinitionBoolean IDEASY_CREATE_DESKTOP_SHORTCUT = new VariableDefinitionBoolean("IDEASY_CREATE_DESKTOP_SHORTCUT", null,
+      c -> Boolean.TRUE);
+
+  /**
+   * {@link VariableDefinition} that controls if the GUI Start Menu shortcut is created when IDEasy gets installed on Windows. Set by the checkbox of the MSI
+   * installer.
+   */
+  VariableDefinitionBoolean IDEASY_CREATE_STARTMENU_SHORTCUT = new VariableDefinitionBoolean("IDEASY_CREATE_STARTMENU_SHORTCUT", null,
+      c -> Boolean.TRUE);
+
   /** {@link VariableDefinition} for {@link com.devonfw.tools.ide.context.IdeContext#getProjectName() DEVON_IDE_CUSTOM_TOOLS}. */
   VariableDefinitionString DEVON_IDE_CUSTOM_TOOLS = new VariableDefinitionString("DEVON_IDE_CUSTOM_TOOLS");
 
@@ -126,13 +146,31 @@ public interface IdeVariables {
   /** {@link VariableDefinition} for support of overriding the default pycharm jvm options. */
   VariableDefinitionString PYCHARM_VM_ARGS = new VariableDefinitionString("PYCHARM_VM_ARGS", null);
 
+  /**
+   * {@link VariableDefinition} to enable the isolation of VSCode via {@code --profile} instead of {@code --user-data-dir}. This is a feature toggle: while
+   * disabled (default) the legacy behaviour with {@code --user-data-dir} is used. See issue #2058 for details.
+   */
+  VariableDefinitionBoolean VSCODE_PROFILE_ENABLED = new VariableDefinitionBoolean("VSCODE_PROFILE_ENABLED", null,
+      c -> Boolean.FALSE);
+
+  /** {@link VariableDefinition} for the uv redirected cache directory */
+  VariableDefinitionPath UV_CACHE_DIR = new VariableDefinitionPath("UV_CACHE_DIR", null,
+      c -> c.getIdePath() == null ? null : c.getIdePath().resolve(IdeContext.FOLDER_SOFTWARE).resolve("uv"), true, true);
+
+  /**
+   * {@link VariableDefinition} to relocate the per-project python virtual environment (see {@code Python}) from its default location inside {@code IDE_HOME}
+   * to a specific location chosen by the user (e.g. a python module). While not set (the default) the virtual environment is created inside {@code IDE_HOME}.
+   */
+  VariableDefinitionString PYTHON_VENV_DIR = new VariableDefinitionString("PYTHON_VENV_DIR", null, c -> null);
+
   /** A {@link Collection} with all pre-defined {@link VariableDefinition}s. */
-  Collection<VariableDefinition<?>> VARIABLES = List.of(PATH, HOME, WORKSPACE_PATH, IDE_HOME, IDE_ROOT, WORKSPACE, IDE_TOOLS, HTTP_VERSIONS,
+  Collection<VariableDefinition<?>> VARIABLES = List.of(PATH, HOME, USER, WORKSPACE_PATH, IDE_HOME, IDE_ROOT, WORKSPACE, IDE_TOOLS, HTTP_VERSIONS,
       CREATE_START_SCRIPTS,
       IDE_MIN_VERSION, MVN_VERSION, M2_REPO, DOCKER_EDITION, MVN_BUILD_OPTS, NPM_BUILD_OPTS, NPM_CONFIG_USERCONFIG, GRADLE_BUILD_OPTS,
       GRADLE_USER_HOME,
       YARN_BUILD_OPTS, JASYPT_OPTS,
       MAVEN_ARGS, INTELLIJ_VM_ARGS, ANDROID_STUDIO_VM_ARGS, PYCHARM_VM_ARGS,
+      UV_CACHE_DIR, PYTHON_VENV_DIR,
       PROJECT_NAME, IDE_VARIABLE_SYNTAX_LEGACY_SUPPORT_ENABLED, PREFERRED_GIT_PROTOCOL);
 
   /**
@@ -163,6 +201,6 @@ public interface IdeVariables {
     if (mvnConf == null) {
       return null;
     }
-    return mvnConf.resolve("repository");
+    return mvnConf.resolve(IdeContext.FOLDER_REPOSITORY);
   }
 }
