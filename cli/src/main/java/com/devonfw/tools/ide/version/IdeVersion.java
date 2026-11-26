@@ -11,6 +11,12 @@ public final class IdeVersion {
   /** The fallback version used if the version is undefined (in local development). */
   public static final String VERSION_UNDEFINED = "SNAPSHOT";
 
+  /**
+   * The suffix appended to the version of a local-dev build (see {@code build-local-dev.sh}) so the running binary self-identifies as a local-dev
+   * installation.
+   */
+  public static final String LOCAL_DEV_SUFFIX = "-DEV-BUILD";
+
   private static final IdeVersion INSTANCE = new IdeVersion();
 
   private String version;
@@ -29,7 +35,7 @@ public final class IdeVersion {
       v = VERSION_UNDEFINED;
     }
     this.version = v;
-    this.versionIdentifier = VersionIdentifier.of(v);
+    this.versionIdentifier = VersionIdentifier.ofRequired(v);
   }
 
   private String getValue(Manifest manifest, Name name) {
@@ -68,13 +74,21 @@ public final class IdeVersion {
     return getVersionString().contains("SNAPSHOT");
   }
 
+  /**
+   * @return {@code true} if the {@link #getVersionString() current version} is a local-dev build stamped with {@link #LOCAL_DEV_SUFFIX} by
+   *     {@code build-local-dev.sh}, {@code false} otherwise.
+   */
+  public static boolean isLocalDevBuild() {
+    return getVersionString().endsWith(LOCAL_DEV_SUFFIX);
+  }
+
   /*
    * For testing purposes only:
    *  function to set the current version to a mock version (e.g. 2024.01.002).
    */
   public static void setMockVersionForTesting(String mockVersion) {
     INSTANCE.version = mockVersion;
-    INSTANCE.versionIdentifier = VersionIdentifier.of(mockVersion);
+    INSTANCE.versionIdentifier = VersionIdentifier.ofRequired(mockVersion);
   }
 
   /*
@@ -83,7 +97,7 @@ public final class IdeVersion {
    */
   public static void setSnapshotVersionForTesting() {
     INSTANCE.version = VERSION_UNDEFINED;
-    INSTANCE.versionIdentifier = VersionIdentifier.of(VERSION_UNDEFINED);
+    INSTANCE.versionIdentifier = VersionIdentifier.ofRequired(VERSION_UNDEFINED);
   }
 
 }

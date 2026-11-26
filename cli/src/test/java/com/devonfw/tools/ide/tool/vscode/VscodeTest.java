@@ -1,24 +1,39 @@
 package com.devonfw.tools.ide.tool.vscode;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
+import com.devonfw.tools.ide.cli.CliException;
+import com.devonfw.tools.ide.commandlet.HelpCommandlet;
 import com.devonfw.tools.ide.context.AbstractIdeContextTest;
+import com.devonfw.tools.ide.context.IdeContext;
 import com.devonfw.tools.ide.context.IdeTestContext;
 import com.devonfw.tools.ide.context.ProcessContextTestImpl;
+import com.devonfw.tools.ide.environment.EnvironmentVariablesType;
+import com.devonfw.tools.ide.io.FileAccess;
 import com.devonfw.tools.ide.os.SystemInfoMock;
 import com.devonfw.tools.ide.process.ProcessContext;
 import com.devonfw.tools.ide.process.ProcessMode;
 import com.devonfw.tools.ide.process.ProcessResult;
 import com.devonfw.tools.ide.process.ProcessResultImpl;
 import com.devonfw.tools.ide.step.Step;
+import com.devonfw.tools.ide.tool.ToolEdition;
+import com.devonfw.tools.ide.tool.ToolEditionAndVersion;
+import com.devonfw.tools.ide.tool.ToolInstallRequest;
+import com.devonfw.tools.ide.tool.plugin.AbstractPluginBasedCommandlet;
 import com.devonfw.tools.ide.tool.plugin.ToolPluginDescriptor;
+import com.devonfw.tools.ide.version.VersionIdentifier;
 
 /**
  * Test of {@link Vscode} class.
@@ -70,7 +85,8 @@ class VscodeTest extends AbstractIdeContextTest {
     commandlet.run();
 
     assertThat(context).logAtSuccess().hasMessage("Successfully installed plugin: mockedPlugin");
-    assertThat(context).logAtSuccess().hasMessage("Successfully ended step 'Install plugin mockedPlugin (1/1)'.");
+    assertThat(context).logAtSuccess().hasNoMessageContaining("Successfully ended step 'Install plugin mockedPlugin");
+    assertThat(context).log().hasMessage("Start: Install plugin mockedPlugin (1/1)");
 
     // assert
     assertThat(commandlet.retrievePluginMarkerFilePath(commandlet.getPlugin("mockedPlugin"))).exists();
@@ -83,7 +99,7 @@ class VscodeTest extends AbstractIdeContextTest {
     // act
     commandlet.run();
     // assert
-    assertThat(context).logAtDebug().hasNoMessage("Successfully installed plugin: ActivePlugin");
+    assertThat(context).log().hasNoMessageContaining("Install plugin mockedPlugin");
   }
 
   @Test
@@ -97,6 +113,8 @@ class VscodeTest extends AbstractIdeContextTest {
     step.run(() -> vscodeCommandlet.installPlugin(plugin, step, new ProcessContextTestImpl(context)));
 
     assertThat(vscodeCommandlet.lastArgs).contains("--install-extension", "publisher.extension@1.2.3");
+    assertThat(context).logAtSuccess().hasMessage("Successfully installed plugin: mockedPlugin with version: 1.2.3");
+    assertThat(context).logAtSuccess().hasNoMessageContaining("Successfully ended step 'Install plugin mockedPlugin'");
   }
 
   @Test
@@ -120,7 +138,7 @@ class VscodeTest extends AbstractIdeContextTest {
 
     assertThat(context.getSoftwarePath().resolve("vscode/.ide.software.version")).exists().hasContent("1.92.1");
     assertThat(context).logAtSuccess().hasMessageContaining("Successfully installed vscode in version 1.92.1");
-    assertThat(context).logAtSuccess().hasMessage("Successfully ended step 'Install plugin mockedPlugin (1/1)'.");
+    assertThat(context).logAtSuccess().hasMessage("Successfully installed plugin: mockedPlugin");
   }
 
   @Test
@@ -149,6 +167,294 @@ class VscodeTest extends AbstractIdeContextTest {
     commandlet.configureToolArgs(pc, ProcessMode.DEFAULT, List.of());
     // assert
     assertThat(pc.getEnvVar("DONT_PROMPT_WSL_INSTALL")).isNull();
+  }
+
+  /**
+   * Tests that by default (feature toggle {@code VSCODE_PROFILE_ENABLED} disabled) {@link Vscode#configureToolArgs(ProcessContext, ProcessMode, List)} points
+   * {@code --user-data-dir} to the IDE metadata folder ({@code $IDE_HOME/.ide/vscode/«workspace»/config}) instead of a {@code .vscode} folder inside the
+   * workspace.
+   */
+  @Test
+  void testConfigureToolArgsUsesIdeMetadataPathForUserData() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.setSystemInfo(SystemInfoMock.LINUX_X64);
+    Vscode commandlet = new Vscode(context);
+    ArgCapturingProcessContext pc = new ArgCapturingProcessContext(context);
+    // act
+    commandlet.configureToolArgs(pc, ProcessMode.DEFAULT, List.of());
+    // assert
+    Path expectedUserData = context.getIdeHome().resolve(IdeContext.FOLDER_DOT_IDE).resolve("vscode").resolve(context.getWorkspaceName()).resolve("config");
+    assertThat(pc.capturedArgs).contains("--user-data-dir=" + expectedUserData);
+    assertThat(pc.capturedArgs).contains("--shared-data-dir=" + expectedUserData.resolveSibling("shared-data"));
+    assertThat(pc.capturedArgs).noneMatch(arg -> arg.contains(".vscode"));
+    assertThat(pc.capturedArgs).noneMatch(arg -> arg.startsWith("--profile="));
+  }
+
+  /**
+   * Tests that by default {@link Vscode#configureToolArgs(ProcessContext, ProcessMode, List)} also passes {@code --shared-data-dir} with the same scope as
+   * {@code --user-data-dir} ({@code $IDE_HOME/.ide/vscode/«workspace»/shared-data}). Otherwise all VS Code instances share {@code ~/.vscode-shared} that holds
+   * the GitHub login encrypted with a key of the user-data-dir so every other instance deletes it (see #2581).
+   */
+  @Test
+  void testConfigureToolArgsUsesSharedDataDirNextToUserData() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.setSystemInfo(SystemInfoMock.WINDOWS_X64);
+    Vscode commandlet = new Vscode(context);
+    ArgCapturingProcessContext pc = new ArgCapturingProcessContext(context);
+    // act
+    commandlet.configureToolArgs(pc, ProcessMode.DEFAULT, List.of());
+    // assert
+    Path metadataPath = context.getIdeHome().resolve(IdeContext.FOLDER_DOT_IDE).resolve("vscode").resolve(context.getWorkspaceName());
+    assertThat(pc.capturedArgs).contains("--user-data-dir=" + metadataPath.resolve("config"), "--shared-data-dir=" + metadataPath.resolve("shared-data"));
+  }
+
+  /**
+   * Tests that with the feature toggle {@code VSCODE_PROFILE_ENABLED} enabled VS Code is launched with a named {@code --profile} and without a custom
+   * {@code --user-data-dir}.
+   * <p>
+   * Using {@code --profile} keeps auth and extension state isolated per project and workspace while keeping the VS Code IPC lock at the default user-data-dir
+   * location, so the OS-level {@code vscode://} protocol handler (e.g. GitHub/Copilot OAuth callbacks) can find and reuse the already-running instance.
+   */
+  @Test
+  void testConfigureToolArgsUsesProfileIfFeatureToggleEnabled() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.setSystemInfo(SystemInfoMock.LINUX_X64);
+    context.getVariables().getByType(EnvironmentVariablesType.CONF).set("VSCODE_PROFILE_ENABLED", "true");
+    Vscode commandlet = new Vscode(context);
+    ArgCapturingProcessContext pc = new ArgCapturingProcessContext(context);
+    // act
+    commandlet.configureToolArgs(pc, ProcessMode.DEFAULT, List.of());
+    // assert
+    assertThat(pc.capturedArgs).noneMatch(arg -> arg.startsWith("--user-data-dir="));
+    // the default user-data-dir needs the default shared-data-dir, otherwise the GitHub login cannot be decrypted (see #2581)
+    assertThat(pc.capturedArgs).noneMatch(arg -> arg.startsWith("--shared-data-dir="));
+    // the profile has to contain the project name so that different projects with the same workspace name do not share a single profile (see #2058)
+    assertThat(pc.capturedArgs).contains("--profile=ideasy-" + context.getProjectName() + "-" + context.getWorkspaceName());
+  }
+
+  /**
+   * Tests that the user settings template {@code .vscode/.userdata} from the settings repository is merged into the VS Code user-data folder
+   * ({@code $IDE_HOME/.ide/vscode/«workspace»/config}) passed via {@code --user-data-dir} instead of the workspace, while the other templates are still merged
+   * into the workspace (see #2509).
+   */
+  @Test
+  void testConfigureWorkspaceMergesUserDataTemplateIntoUserDataFolder() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode commandlet = new Vscode(context);
+    Path workspace = context.getWorkspacePath();
+    // act
+    commandlet.configureWorkspace();
+    // assert
+    assertThat(getUserDataPath(context).resolve("User/settings.json")).exists().content().contains("\"telemetry.telemetryLevel\": \"off\"")
+        .contains("\"update.mode\": \"none\"");
+    assertThat(workspace.resolve(".vscode/.userdata")).doesNotExist();
+    assertThat(workspace.resolve(".vscode/settings.json")).exists().content().contains("\"editor.formatOnSave\": true");
+  }
+
+  /**
+   * Tests that a {@code .vscode/.userdata} folder left in the workspace is moved to the VS Code user-data folder if that does not exist yet.
+   */
+  @Test
+  void testConfigureWorkspaceMovesLegacyUserDataIfUserDataFolderIsMissing() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    FileAccess fileAccess = context.getFileAccess();
+    Path legacyUserData = context.getWorkspacePath().resolve(".vscode/.userdata");
+    fileAccess.writeFileContent("legacy", legacyUserData.resolve("state.json"), true);
+    Vscode commandlet = new Vscode(context);
+    // act
+    commandlet.configureWorkspace();
+    // assert
+    assertThat(getUserDataPath(context).resolve("state.json")).exists().hasContent("legacy");
+    assertThat(legacyUserData).doesNotExist();
+  }
+
+  /**
+   * Tests that a {@code .vscode/.userdata} folder left in the workspace is removed from the workspace (via backup) without touching the VS Code user-data
+   * folder if that already exists.
+   */
+  @Test
+  void testConfigureWorkspaceRemovesLegacyUserDataIfUserDataFolderExists() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    FileAccess fileAccess = context.getFileAccess();
+    Path legacyUserData = context.getWorkspacePath().resolve(".vscode/.userdata");
+    fileAccess.writeFileContent("legacy", legacyUserData.resolve("state.json"), true);
+    Path userData = getUserDataPath(context);
+    fileAccess.writeFileContent("current", userData.resolve("state.json"), true);
+    Vscode commandlet = new Vscode(context);
+    // act
+    commandlet.configureWorkspace();
+    // assert
+    assertThat(userData.resolve("state.json")).exists().hasContent("current");
+    assertThat(legacyUserData).doesNotExist();
+    assertThat(context.getIdeHome().resolve(IdeContext.FOLDER_BACKUPS)).exists();
+  }
+
+  /**
+   * Tests that the workspace is still configured if the obsolete {@code .vscode/.userdata} folder cannot be removed, e.g. because files inside it are locked
+   * on Windows. Such housekeeping must never prevent the IDE from starting.
+   */
+  @Test
+  void testConfigureWorkspaceContinuesIfLegacyUserDataCannotBeRemoved() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    FileAccess fileAccess = context.getFileAccess();
+    Path legacyUserData = context.getWorkspacePath().resolve(".vscode/.userdata");
+    fileAccess.writeFileContent("legacy", legacyUserData.resolve("state.json"), true);
+    Path userData = getUserDataPath(context);
+    fileAccess.writeFileContent("current", userData.resolve("state.json"), true);
+    // a regular file instead of the backup folder makes the backup of the legacy folder fail
+    fileAccess.writeFileContent("blocked", context.getIdeHome().resolve(IdeContext.FOLDER_BACKUPS), true);
+    Vscode commandlet = new Vscode(context);
+    // act
+    commandlet.configureWorkspace();
+    // assert
+    assertThat(context).logAtWarning().hasMessageContaining("Failed to remove obsolete VSCode user-data folder");
+    assertThat(userData.resolve("User/settings.json")).exists().content().contains("\"telemetry.telemetryLevel\": \"off\"");
+  }
+
+  /**
+   * Tests that the user settings template is merged out of the workspace also with the feature toggle {@code VSCODE_PROFILE_ENABLED} enabled. VSCode then
+   * reads its user settings from the named profile instead (see #2058), but the workspace has to stay clean in both cases.
+   */
+  @Test
+  void testConfigureWorkspaceKeepsWorkspaceCleanIfProfileIsEnabled() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.getVariables().getByType(EnvironmentVariablesType.CONF).set("VSCODE_PROFILE_ENABLED", "true");
+    Vscode commandlet = new Vscode(context);
+    // act
+    commandlet.configureWorkspace();
+    // assert
+    assertThat(context.getWorkspacePath().resolve(".vscode/.userdata")).doesNotExist();
+    assertThat(getUserDataPath(context).resolve("User/settings.json")).exists();
+  }
+
+  private static Path getUserDataPath(IdeTestContext context) {
+
+    return context.getIdeHome().resolve(IdeContext.FOLDER_DOT_IDE).resolve("vscode").resolve(context.getWorkspaceName()).resolve("config");
+  }
+
+  /**
+   * Tests that with an explicit {@code --project} folder
+   * {@link Vscode#configureToolArgs(ProcessContext, ProcessMode, List)} appends the selected folder
+   * ({@link AbstractIdeToolCommandlet#getOpenPath()}) to the launch arguments instead of the managed workspace path, while the
+   * {@code --user-data-dir} / {@code --profile} stay on the {@code main} profile (sharing is decided behavior, see #2393).
+   */
+  @Test
+  void testConfigureToolArgsUsesOpenPathForProject() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.setSystemInfo(SystemInfoMock.LINUX_X64);
+    Path external = context.getIdeHome().resolve("external-project").normalize();
+    ProjectVscode commandlet = new ProjectVscode(context);
+    commandlet.setProject(external);
+    ArgCapturingProcessContext pc = new ArgCapturingProcessContext(context);
+    // act
+    commandlet.configureToolArgs(pc, ProcessMode.DEFAULT, List.of());
+    // assert
+    assertThat(pc.capturedArgs).contains(external.toString());
+    assertThat(pc.capturedArgs).doesNotContain(context.getWorkspacePath().toString());
+    // the VS Code profile stays on the managed workspace, not the external project
+    assertThat(pc.capturedArgs).anyMatch(arg -> arg.startsWith("--user-data-dir=")
+        && arg.contains(context.getWorkspaceName().toString()));
+  }
+
+  /**
+   * Tests that without an explicit {@code --project} folder VS Code is launched with the managed workspace path (regression guard, no-flag behavior is
+   * unchanged by #2492) and {@code --user-data-dir} points at the main metadata profile.
+   */
+  @Test
+  void testConfigureToolArgsUsesWorkspacePathWithoutProject() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.setSystemInfo(SystemInfoMock.LINUX_X64);
+    ProjectVscode commandlet = new ProjectVscode(context);
+    ArgCapturingProcessContext pc = new ArgCapturingProcessContext(context);
+    // act
+    commandlet.configureToolArgs(pc, ProcessMode.DEFAULT, List.of());
+    // assert
+    assertThat(pc.capturedArgs).contains(context.getWorkspacePath().toString());
+    assertThat(pc.capturedArgs)
+        .anyMatch(arg -> arg.startsWith("--user-data-dir=")
+            && arg.equals("--user-data-dir=" + context.getIdeHome().resolve(IdeContext.FOLDER_DOT_IDE).resolve("vscode")
+                .resolve(context.getWorkspaceName()).resolve("config")));
+  }
+
+  /**
+   * Tests that an invalid explicit {@code --project} folder (a non-existing folder or a regular file) aborts the VS Code launch with a {@link CliException}
+   * via {@link AbstractIdeToolCommandlet#validateOpenPath()}. Mirrors the IntelliJ-specific {@code testGetOpenPathInvalidPathThrows}, since both share the same
+   * validation path.
+   */
+  @Test
+  void testValidateOpenPathForVscodeThrowsOnInvalidProject() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.setSystemInfo(SystemInfoMock.LINUX_X64);
+    ProjectVscode commandlet = new ProjectVscode(context);
+    ProcessContextTestImpl pc = new ProcessContextTestImpl(context);
+    // act & assert - a non-existing folder
+    commandlet.setProject(Path.of("does-not-exist-folder-12345"));
+    assertThatThrownBy(() -> commandlet.runTool(pc, ProcessMode.BACKGROUND, List.of())).isInstanceOf(CliException.class);
+    // act & assert - a file is not a folder
+    Path file = context.getWorkspacePath().resolve("a-file.txt");
+    context.getFileAccess().writeFileContent("content", file);
+    commandlet.setProject(file);
+    assertThatThrownBy(() -> commandlet.runTool(pc, ProcessMode.BACKGROUND, List.of())).isInstanceOf(CliException.class);
+  }
+
+  /**
+   * Test of {@link HelpCommandlet} renders the {@code --project} option for the {@link Vscode} commandlet (the flag is declared on
+   * {@link com.devonfw.tools.ide.tool.ide.AbstractIdeToolCommandlet} and inherited here). The assertion is form-independent so it does not depend on whether
+   * the option is spelled {@code --project} or {@code --project=<path>} in the help text.
+   */
+  @Test
+  void testVscodeHelpDocumentsProjectOption() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.getStartContext().setLocale(Locale.ROOT);
+    HelpCommandlet help = context.getCommandletManager().getCommandlet(HelpCommandlet.class);
+    help.commandlet.setValueAsString("vscode", context);
+    // act
+    help.run();
+    // assert - the option shows up in the usage line and its help text is rendered
+    assertThat(context).logAtInfo().hasMessageContaining("[--project]");
+    assertThat(context).logAtInfo()
+        .hasMessageContaining("the folder to open in the IDE instead of the default workspace");
+  }
+
+  /**
+   * Tests that {@code VSCODE_OPTIONS} is honoured by appending its tokens as additional command-line arguments when starting the IDE (analogue to the
+   * global {@code IDE_OPTIONS} used for IDEasy itself, see issue #788).
+   */
+  @Test
+  void testRunAddsVscodeOptions() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    context.getVariables().getByType(EnvironmentVariablesType.CONF).set("VSCODE_OPTIONS", "--wait --new-window");
+    CapturingVscode commandlet = new CapturingVscode(context);
+    // act
+    commandlet.run();
+    // assert
+    assertThat(commandlet.lastArgs).contains("--wait", "--new-window");
   }
 
   @Test
@@ -228,6 +534,218 @@ class VscodeTest extends AbstractIdeContextTest {
     assertThat(excludedEditions).contains("vscode", "vscodium");
   }
 
+  @Test
+  void testPluginPurgeRequiredOnMajorVersionChangeOnly() {
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+    ToolEdition edition = new ToolEdition(PROJECT_VSCODE, PROJECT_VSCODE);
+
+    ToolEditionAndVersion installed = new ToolEditionAndVersion(edition);
+    installed.setResolvedVersion(VersionIdentifier.ofRequired("1.90.0"));
+    ToolEditionAndVersion requestedMajor = new ToolEditionAndVersion(edition);
+    requestedMajor.setResolvedVersion(VersionIdentifier.ofRequired("2.90.0"));
+    ToolInstallRequest majorVersionChange = new ToolInstallRequest(true);
+    majorVersionChange.setInstalled(installed);
+    majorVersionChange.setRequested(requestedMajor);
+
+    ToolEditionAndVersion requestedMinor = new ToolEditionAndVersion(edition);
+    requestedMinor.setResolvedVersion(VersionIdentifier.ofRequired("1.91.0"));
+    ToolInstallRequest minorVersionChange = new ToolInstallRequest(true);
+    minorVersionChange.setInstalled(installed);
+    minorVersionChange.setRequested(requestedMinor);
+
+    // act
+    boolean purgeOnMajor = vscodeCommandlet.isPluginPurgeRequired(majorVersionChange);
+    boolean purgeOnMinor = vscodeCommandlet.isPluginPurgeRequired(minorVersionChange);
+
+    // assert
+    assertThat(purgeOnMajor).isTrue();
+    assertThat(purgeOnMinor).isFalse();
+  }
+
+  /**
+   * Tests that {@link Vscode#importRepository(Path)} creates a multi-root {@code .code-workspace} file for a Maven project so the project is opened as a
+   * project root on launch.
+   */
+  @Test
+  void testVscodeMvnRepositoryImport() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+    Path repositoryPath = context.getWorkspacePath().resolve("test_mvn");
+
+    // act
+    vscodeCommandlet.importRepository(repositoryPath);
+
+    // assert
+    Path workspaceFile = context.getWorkspacePath().resolve("ide.code-workspace");
+    assertThat(workspaceFile).exists().content().contains("folders").contains("test_mvn");
+  }
+
+  /**
+   * Tests that {@link Vscode#importRepository(Path)} accumulates multiple imported projects as the multiple roots of a single {@code .code-workspace}
+   * file and does not create duplicates when a project is imported twice.
+   */
+  @Test
+  void testVscodeRepositoryImportAccumulatesMultipleProjects() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+    Path workspaceFile = context.getWorkspacePath().resolve("ide.code-workspace");
+
+    // act: import two distinct projects into the same workspace
+    vscodeCommandlet.importRepository(context.getWorkspacePath().resolve("test_mvn"));
+    vscodeCommandlet.importRepository(context.getWorkspacePath().resolve("test_mvn2"));
+
+    // assert: both projects are roots of the single workspace
+    assertThat(context.getFileAccess().readFileContent(workspaceFile)).contains("test_mvn", "test_mvn2");
+    assertThat(countOccurrences(context.getFileAccess().readFileContent(workspaceFile), "\"path\"")).isEqualTo(2);
+
+    // act: re-import an already imported project
+    vscodeCommandlet.importRepository(context.getWorkspacePath().resolve("test_mvn"));
+
+    // assert: no duplicate is added
+    assertThat(countOccurrences(context.getFileAccess().readFileContent(workspaceFile), "\"path\"")).isEqualTo(2);
+  }
+
+  /**
+   * Tests that {@link Vscode#importRepository(Path)} drops a root from the {@code .code-workspace} file when the corresponding project folder no longer
+   * exists on disk (auto-cleanup).
+   */
+  @Test
+  void testVscodeRepositoryImportRemovesDeletedProject() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+    Path workspacePath = context.getWorkspacePath();
+    Path workspaceFile = workspacePath.resolve("ide.code-workspace");
+    Path deletedProject = workspacePath.resolve("test_mvn");
+    Path keptProject = workspacePath.resolve("test_mvn2");
+
+    // act: import two projects, then delete one of them from disk and import it again (or import the other)
+    vscodeCommandlet.importRepository(deletedProject);
+    vscodeCommandlet.importRepository(keptProject);
+    deleteRecursively(deletedProject);
+    vscodeCommandlet.importRepository(keptProject);
+
+    // assert: the deleted project is pruned, the kept project remains
+    String content = context.getFileAccess().readFileContent(workspaceFile);
+    assertThat(content).doesNotContain("test_mvn\"").contains("test_mvn2");
+    assertThat(countOccurrences(content, "\"path\"")).isEqualTo(1);
+  }
+
+  /**
+   * Recursively deletes the given file or directory.
+   */
+  private static void deleteRecursively(Path path) {
+
+    if (!Files.exists(path)) {
+      return;
+    }
+    try (var paths = Files.walk(path)) {
+      paths.sorted(Comparator.reverseOrder()).forEach(p -> {
+        try {
+          Files.delete(p);
+        } catch (IOException e) {
+          throw new IllegalStateException("Failed to delete " + p, e);
+        }
+      });
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to delete " + path, e);
+    }
+  }
+
+  /**
+   * Counts the occurrences of the given needle in the given haystack.
+   */
+  private static int countOccurrences(String haystack, String needle) {
+
+    int count = 0;
+    int index = 0;
+    while ((index = haystack.indexOf(needle, index)) != -1) {
+      count++;
+      index += needle.length();
+    }
+    return count;
+  }
+
+  /**
+   * Tests that {@link Vscode#importRepository(Path)} creates a multi-root {@code .code-workspace} file for a Gradle project in a non-main workspace, with
+   * the project path relative to that workspace.
+   */
+  @Test
+  void testVscodeGradleRepositoryImport() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+    Path repositoryPath = context.getWorkspacePath("test").resolve("subfolder/test_gradle");
+
+    // act
+    vscodeCommandlet.importRepository(repositoryPath);
+
+    // assert
+    Path workspaceFile = context.getWorkspacePath("test").resolve("ide.code-workspace");
+    assertThat(workspaceFile).exists().content().contains("folders").contains("subfolder/test_gradle");
+  }
+
+  /**
+   * Tests that {@link Vscode#importRepository(Path)} logs a warning and creates no {@code .code-workspace} file when the repository contains no supported
+   * build descriptor.
+   */
+  @Test
+  void testVscodeRepositoryImportWithoutSupportedBuildDescriptor() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+    Path repositoryPath = context.getWorkspacePath().resolve("empty_project");
+    context.getFileAccess().mkdirs(repositoryPath);
+
+    // act
+    vscodeCommandlet.importRepository(repositoryPath);
+
+    // assert
+    assertThat(context).logAtWarning().hasMessageContaining("No supported build descriptor was found for project import in");
+    assertThat(context.getWorkspacePath().resolve("ide.code-workspace")).doesNotExist();
+  }
+
+  /**
+   * Tests that {@link Vscode#getWorkspaceTarget()} falls back to the workspace folder when no {@code .code-workspace} file has been created yet.
+   */
+  @Test
+  void testVscodeWorkspaceTargetFallsBackToFolder() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+
+    // act & assert
+    assertThat(vscodeCommandlet.getWorkspaceTarget()).isEqualTo(context.getWorkspacePath());
+  }
+
+  /**
+   * Tests that {@link Vscode#getWorkspaceTarget()} returns the {@code .code-workspace} file so that VSCode opens it (and thus loads the imported projects
+   * as project roots) once the file has been created by a repository import.
+   */
+  @Test
+  void testVscodeWorkspaceTargetUsesWorkspaceFile() {
+
+    // arrange
+    IdeTestContext context = newContext(PROJECT_VSCODE);
+    Vscode vscodeCommandlet = new Vscode(context);
+    Path workspaceFile = context.getWorkspacePath().resolve("ide.code-workspace");
+    context.getFileAccess().writeFileContent("{\"folders\": []}", workspaceFile);
+
+    // act & assert
+    assertThat(vscodeCommandlet.getWorkspaceTarget()).isEqualTo(workspaceFile);
+  }
+
+
   /**
    * Test double for {@link Vscode} that captures CLI arguments passed to {@link #runTool(ProcessContext, ProcessMode, List)} so tests can assert command
    * construction without spawning an external process.
@@ -251,9 +769,25 @@ class VscodeTest extends AbstractIdeContextTest {
       return new ProcessResultImpl("code", "code", 0, List.of());
     }
 
-    /** Exposes the protected {@link com.devonfw.tools.ide.tool.plugin.PluginBasedCommandlet#installPlugins(Collection, ProcessContext)} for testing. */
+    /** Exposes the protected {@link AbstractPluginBasedCommandlet#installPlugins(Collection, ProcessContext)} for testing. */
     public void installPluginsForTest(Collection<ToolPluginDescriptor> plugins, ProcessContext pc) {
       installPlugins(plugins, pc);
+    }
+  }
+
+  /**
+   * {@link Vscode} test double exposing a setter for the inherited protected {@code --project} {@code FolderProperty} so {@code configureToolArgs} tests can
+   * simulate an explicit {@code --project} folder without going through the full CLI path.
+   */
+  private static class ProjectVscode extends Vscode {
+
+    private ProjectVscode(IdeTestContext context) {
+
+      super(context);
+    }
+
+    public void setProject(Path project) {
+      this.project.setValue(project);
     }
   }
 
@@ -279,6 +813,26 @@ class VscodeTest extends AbstractIdeContextTest {
     String getEnvVar(String key) {
 
       return this.capturedEnvVars.get(key);
+    }
+  }
+
+  /**
+   * {@link ProcessContextTestImpl} subclass that captures the CLI arguments added via {@link #addArg(String)} for test assertions.
+   */
+  private static class ArgCapturingProcessContext extends ProcessContextTestImpl {
+
+    private final List<String> capturedArgs = new ArrayList<>();
+
+    private ArgCapturingProcessContext(IdeTestContext context) {
+
+      super(context);
+    }
+
+    @Override
+    public ProcessContext addArg(String arg) {
+
+      this.capturedArgs.add(arg);
+      return super.addArg(arg);
     }
   }
 

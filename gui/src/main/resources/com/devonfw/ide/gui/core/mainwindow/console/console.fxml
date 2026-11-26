@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ListView?>
+<?import javafx.scene.control.Separator?>
+<?import javafx.scene.layout.AnchorPane?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.VBox?>
+<AnchorPane
+  xmlns:fx="http://javafx.com/fxml"
+  xmlns="http://javafx.com/javafx"
+  fx:id="consoleRoot"
+  fx:controller="com.devonfw.ide.gui.core.mainwindow.console.ConsoleView"
+  prefWidth="Infinity"
+  styleClass="console-root"
+  stylesheets="@../../../style/console.css"
+  AnchorPane.topAnchor="0" AnchorPane.bottomAnchor="0"
+  AnchorPane.leftAnchor="0" AnchorPane.rightAnchor="0"
+  minHeight="0"
+>
+
+  <VBox spacing="5" minWidth="-Infinity" styleClass="vBox-style" AnchorPane.topAnchor="0"
+    AnchorPane.bottomAnchor="0"
+    AnchorPane.leftAnchor="0" AnchorPane.rightAnchor="0">
+    <padding>
+      <Insets top="5" right="5" bottom="5" left="5"/>
+    </padding>
+
+    <HBox spacing="10" styleClass="center-left" alignment="CENTER_LEFT">
+      <Label text="%console_title" styleClass="console-title" HBox.hgrow="ALWAYS"/>
+      <Separator orientation="VERTICAL" styleClass="vertical-separator"/>
+
+      <Button fx:id="clearButton" text="%console_clear" prefWidth="60" styleClass="clear-button"/>
+
+      <Region HBox.hgrow="ALWAYS"/>
+
+      <CheckBox fx:id="autoScrollCheckBox" text="%console_auto_scroll" selected="true" styleClass="checkbox"/>
+    </HBox>
+
+    <Separator/>
+
+    <ListView fx:id="consoleListView" VBox.vgrow="ALWAYS"
+      styleClass="console-list-view"/>
+
+    <HBox spacing="10" styleClass="status-hbox">
+      <Region HBox.hgrow="ALWAYS"/>
+      <Label fx:id="lineCountLabel" text="%console_line_count" styleClass="line-count-label"/>
+    </HBox>
+  </VBox>
+</AnchorPane>

@@ -1,16 +1,60 @@
 package com.devonfw.tools.ide.url.model.file.json;
 
 import java.util.List;
+import java.util.Map;
 
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import com.devonfw.tools.ide.os.OperatingSystem;
+import com.devonfw.tools.ide.version.VersionIdentifier;
 import com.devonfw.tools.ide.version.VersionRange;
 
 /**
  * Test of {@link Cve}.
  */
 class CveTest extends Assertions {
+
+  @Test
+  void testIsAffected() {
+
+    // arrange
+    Cve cve = new Cve("CVE-2024-99999", 5.0, List.of(VersionRange.of("(,1.0.0)")),
+        Map.of("windows", List.of(VersionRange.of("[2.0.0,2.0.8]")), "linux", List.of(VersionRange.of("[2.0.0,2.0.5]"))));
+
+    // act + assert
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("0.9.0"), OperatingSystem.LINUX)).isTrue();
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("2.0.6"), OperatingSystem.WINDOWS)).isTrue();
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("2.0.6"), OperatingSystem.LINUX)).isFalse();
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("2.0.6"), OperatingSystem.MAC)).isFalse();
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("2.0.6"), null)).isFalse();
+  }
+
+  @Test
+  void testOsOnlyCveWithEmptyGeneralVersions() {
+
+    // arrange
+    Cve cve = new Cve("CVE-2024-88888", 7.0, List.of(), Map.of("windows", List.of(VersionRange.of("[1.0.0,1.2.0]"))));
+
+    // act + assert
+    assertThat(cve.versions()).isEmpty();
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("1.1.0"), OperatingSystem.WINDOWS)).isTrue();
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("1.1.0"), OperatingSystem.LINUX)).isFalse();
+    assertThat(cve.isAffected(VersionIdentifier.ofRequired("1.1.0"), null)).isFalse();
+  }
+
+  @Test
+  void testToStringContainsOsSpecificConditions() {
+
+    // arrange
+    Cve cve = new Cve("CVE-2024-88888", 7.0, List.of(), Map.of("windows", List.of(VersionRange.of("[1.0.0,1.2.0]"))));
+
+    // act
+    String result = cve.toString();
+
+    // assert
+    assertThat(result).contains("CVE-2024-88888", "windows", "[1.0.0,1.2.0]");
+  }
 
   @Test
   void testMerge() {

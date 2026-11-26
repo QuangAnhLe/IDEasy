@@ -3,6 +3,7 @@ package com.devonfw.tools.ide.io;
 import static com.devonfw.tools.ide.io.FileAccessImpl.generatePermissionString;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -24,10 +25,14 @@ import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
 import com.devonfw.tools.ide.context.AbstractIdeContextTest;
+import com.devonfw.tools.ide.context.IdeContext;
 import com.devonfw.tools.ide.context.IdeTestContext;
+import com.devonfw.tools.ide.os.SystemInfoImpl;
 import com.devonfw.tools.ide.os.SystemInfoMock;
+import com.devonfw.tools.ide.process.ProcessContext;
 
 /**
  * Test of {@link FileAccessImpl}.
@@ -271,6 +276,44 @@ class FileAccessImplTest extends AbstractIdeContextTest {
 
     assertThat(frameworkLink).hasContent("binary");
     assertThat(frameworkLink.toRealPath()).isEqualTo(realPath(versionA.resolve("Electron Framework")));
+  }
+
+  /**
+   * Tests that {@link FileAccessImpl#extractDmg(Path, Path)} preserves application bundle symbolic links. Disabled on Windows, where DMG extraction is not
+   * supported.
+   *
+   * @param tempDir the temporary directory.
+   * @throws IOException on test setup failure.
+   */
+  @Test
+  @DisabledOnOs(OS.WINDOWS)
+  void testExtractDmgPreservesSymbolicLinks(@TempDir Path tempDir) throws IOException {
+
+    // arrange
+    WindowsSymlinkTestHelper.assumeSymlinksSupported();
+    IdeTestContext context = newContext(tempDir);
+    context.setIdeHome(tempDir);
+    context.setSystemInfo(SystemInfoMock.MAC_X64);
+    ProcessContext processContext = Mockito.mock(ProcessContext.class, Mockito.RETURNS_SELF);
+    context.setProcessContext(processContext);
+    Path appPath = tempDir.resolve(IdeContext.FOLDER_UPDATES).resolve(IdeContext.FOLDER_VOLUME).resolve("MyApp.app");
+    Path versions = appPath.resolve("Contents/Frameworks/My.framework/Versions");
+    Path sourceFile = versions.resolve("A/My");
+    Files.createDirectories(sourceFile.getParent());
+    Files.writeString(sourceFile, "x".repeat(1024));
+    context.getFileAccess().makeExecutable(sourceFile);
+    Files.createSymbolicLink(versions.resolve("Current"), Path.of("A"));
+    Path target = tempDir.resolve("target");
+
+    // act
+    context.getFileAccess().extractDmg(tempDir.resolve("MyApp.dmg"), target);
+
+    // assert
+    Path copiedLink = target.resolve("MyApp.app/Contents/Frameworks/My.framework/Versions/Current");
+    assertThat(copiedLink).isSymbolicLink();
+    assertThat(Files.readSymbolicLink(copiedLink)).isEqualTo(Path.of("A"));
+    assertThat(copiedLink.resolve("My")).hasSameTextualContentAs(sourceFile);
+    assertThat(copiedLink.resolve("My")).isExecutable();
   }
 
   private void createDirs(FileAccess fileAccess, Path dir) {
@@ -797,6 +840,85 @@ class FileAccessImplTest extends AbstractIdeContextTest {
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
+  }
+
+  /**
+   * Test of {@link FileAccessImpl#compress(Path, java.io.OutputStream, String)} / {@link FileAccessImpl#extractZip(Path, Path)} with a full
+   * compress → extract round-trip, checking that the executable bit survives on Unix.
+   * <p>
+   * This is the regression guard for the runtime zip path used when a tool archive is served by the mock repository: previously the executable bit was
+   * silently dropped for zip entries (unlike tar entries), so on Linux/Mac the extracted launcher (e.g. {@code bin/dart}) would no longer be executable.
+   */
+  @Test
+  @DisabledOnOs(OS.WINDOWS)
+  void testCompressAndExtractZipPreservesExecutableBit(@TempDir Path tempDir) throws IOException {
+
+    // arrange
+    IdeTestContext context = new IdeTestContext();
+    FileAccess fileAccess = new FileAccessImpl(context);
+    Path srcDir = tempDir.resolve("sdk");
+    fileAccess.mkdirs(srcDir);
+    Path exe = srcDir.resolve("launcher");
+    Path plain = srcDir.resolve("data.txt");
+    Files.writeString(exe, "executable content");
+    Files.writeString(plain, "plain content");
+    Files.setPosixFilePermissions(exe, PosixFilePermissions.fromString("rwxr-xr-x"));
+    Files.setPosixFilePermissions(plain, PosixFilePermissions.fromString("rw-r--r--"));
+
+    // act - compress the directory to a zip and extract it again
+    Path zipFile = tempDir.resolve("sdk.zip");
+    try (OutputStream out = Files.newOutputStream(zipFile)) {
+      fileAccess.compress(srcDir, out, "sdk.zip");
+    }
+    Path targetDir = tempDir.resolve("extracted");
+    fileAccess.extractZip(zipFile, targetDir);
+
+    // assert - the executable bit must survive the round-trip, while the plain file stays non-executable
+    assertPosixFilePermissions(targetDir.resolve("launcher"), "rwxr-xr-x");
+    assertPosixFilePermissions(targetDir.resolve("data.txt"), "rw-r--r--");
+  }
+
+  /**
+   * Test of {@link FileAccessImpl#extractDmg(Path, Path)} with a progress bar for copying the mounted app.
+   */
+  @Test
+  void testExtractDmgWithProgressBar(@TempDir Path tempDir) throws IOException {
+
+    // arrange
+    IdeTestContext context = newContext(tempDir);
+    context.setIdeHome(tempDir);
+    context.setSystemInfo(SystemInfoMock.MAC_X64);
+    ProcessContext processContext = Mockito.mock(ProcessContext.class);
+    context.setProcessContext(processContext);
+    Path appPath = context.getIdeHome().resolve(IdeContext.FOLDER_UPDATES).resolve(IdeContext.FOLDER_VOLUME).resolve("MyApp.app");
+    Path resourceFile = appPath.resolve("Contents/Resources/resource.txt");
+    Path executableFile = appPath.resolve("Contents/MacOS/myapp");
+    Files.createDirectories(resourceFile.getParent());
+    Files.createDirectories(executableFile.getParent());
+    Files.writeString(resourceFile, "x".repeat(150_000));
+    Files.writeString(executableFile, "#!/bin/sh\necho myapp\n");
+    boolean posix = !SystemInfoImpl.INSTANCE.isWindows();
+    if (posix) {
+      Files.setPosixFilePermissions(executableFile, PosixFilePermissions.fromString("rwxr-xr-x"));
+    }
+    long appSize = Files.size(resourceFile) + Files.size(executableFile);
+    Path target = tempDir.resolve("target");
+    Path targetApp = target.resolve(appPath.getFileName());
+
+    // act
+    context.getFileAccess().extractDmg(tempDir.resolve("MyApp.dmg"), target);
+
+    // assert
+    assertThat(targetApp.resolve(appPath.relativize(resourceFile))).hasSameBinaryContentAs(resourceFile);
+    assertThat(targetApp.resolve(appPath.relativize(executableFile))).hasSameBinaryContentAs(executableFile);
+    if (posix) {
+      assertPosixFilePermissions(targetApp.resolve(appPath.relativize(executableFile)), "rwxr-xr-x");
+    }
+    IdeProgressBarTestImpl progressBar = context.getProgressBarMap().get(IdeProgressBar.TITLE_COPYING);
+    assertThat(progressBar).isNotNull();
+    assertThat(progressBar.getMaxSize()).isEqualTo(appSize);
+    assertThat(progressBar.getCurrentProgress()).isEqualTo(appSize);
+    assertThat(progressBar.getEventList()).hasSizeGreaterThan(2);
   }
 
   /**
